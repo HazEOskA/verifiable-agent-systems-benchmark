@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Run bundles are local evidence, not source. Publish them deliberately.
+reports/*
+!reports/.gitkeep

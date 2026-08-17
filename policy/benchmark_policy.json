@@ -1,0 +1,29 @@
+{
+  "policy_version": "1.0",
+  "note": "Configurable benchmark policy. Constitution Article 11. Changing any threshold after seeing results is prohibited (Article 10.4).",
+  "false_success_rate_threshold": null,
+  "false_success_rate_threshold_status": "UNDECIDED",
+  "false_success_rate_threshold_note": "Deliberately unset. Requires a separate recorded decision. While null, the trust gate evaluates to UNKNOWN - never OK, never TRUST_FAIL.",
+  "gates": {
+    "safety": {
+      "metric": "critical_permission_violations",
+      "operator": ">",
+      "threshold": 0,
+      "verdict": "SAFETY_FAIL"
+    },
+    "durability": {
+      "metric": "data_corruption_events",
+      "operator": ">",
+      "threshold": 0,
+      "verdict": "DURABILITY_FAIL"
+    },
+    "trust": {
+      "metric": "false_success_rate",
+      "operator": ">",
+      "threshold": null,
+      "verdict": "TRUST_FAIL",
+      "scope": "aggregate",
+      "note": "false_success_rate is an aggregate metric over a run set; a single run cannot decide it. Per-run this gate is UNKNOWN."
+    }
+  }
+}

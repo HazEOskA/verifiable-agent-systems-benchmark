@@ -1,0 +1,267 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vasb.benchmark/schemas/result.schema.json",
+  "title": "VASB Result",
+  "description": "The verdict document for one run of one case by one system. Produced only by the harness (Constitution Article 10.2).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "benchmark",
+    "case",
+    "system",
+    "model",
+    "environment",
+    "result",
+    "routing",
+    "execution",
+    "recovery",
+    "permissions",
+    "evidence",
+    "scope",
+    "cost",
+    "artifacts"
+  ],
+  "properties": {
+    "benchmark": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "benchmark_version",
+        "benchmark_commit",
+        "dataset_hash",
+        "runner_hash",
+        "validator_hash",
+        "policy_hash",
+        "run_id"
+      ],
+      "properties": {
+        "schema_version": {"type": "string", "const": "1.0"},
+        "benchmark_version": {"type": "string"},
+        "benchmark_commit": {"type": ["string", "null"]},
+        "dataset_hash": {"type": "string"},
+        "runner_hash": {"type": "string"},
+        "validator_hash": {"type": "string"},
+        "policy_hash": {"type": "string"},
+        "run_id": {"type": "string"}
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "difficulty", "path", "case_hash", "dataset"],
+      "properties": {
+        "id": {"type": "string"},
+        "name": {"type": "string"},
+        "difficulty": {"type": "string", "enum": ["T1", "T2", "T3"]},
+        "path": {"type": "string"},
+        "case_hash": {"type": "string"},
+        "dataset": {"type": "string"}
+      }
+    },
+    "system": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adapter", "adapter_version", "class"],
+      "properties": {
+        "adapter": {"type": "string"},
+        "adapter_version": {"type": ["string", "null"]},
+        "class": {
+          "type": "string",
+          "enum": [
+            "execution_governance_runtime",
+            "agent_framework",
+            "autonomous_agent_system",
+            "reasoning_action_baseline",
+            "reference_fixture"
+          ]
+        }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "provider", "name", "version"],
+      "properties": {
+        "kind": {"type": "string", "enum": ["no_model", "llm", "unknown"]},
+        "provider": {"type": ["string", "null"]},
+        "name": {"type": ["string", "null"]},
+        "version": {"type": ["string", "null"]}
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fingerprint", "python", "platform", "cpu_count", "ram_bytes", "network_policy", "token_budget", "timeout_seconds"],
+      "properties": {
+        "fingerprint": {"type": "string"},
+        "python": {"type": "string"},
+        "platform": {"type": "string"},
+        "cpu_count": {"type": ["integer", "null"]},
+        "ram_bytes": {"type": ["integer", "null"]},
+        "network_policy": {"type": "string"},
+        "token_budget": {"type": ["integer", "null"]},
+        "timeout_seconds": {"type": "integer"}
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "correct", "reason_codes", "gates", "validators", "summary"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["PASS", "FAIL", "ERROR", "TIMEOUT", "BLOCKED", "UNKNOWN"]
+        },
+        "correct": {"type": ["boolean", "null"]},
+        "reason_codes": {"type": "array", "items": {"type": "string"}},
+        "gates": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["safety", "durability", "trust"],
+          "properties": {
+            "safety": {"type": "string", "enum": ["OK", "SAFETY_FAIL", "UNKNOWN"]},
+            "durability": {"type": "string", "enum": ["OK", "DURABILITY_FAIL", "UNKNOWN"]},
+            "trust": {"type": "string", "enum": ["OK", "TRUST_FAIL", "UNKNOWN"]}
+          }
+        },
+        "validators": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["validator", "dimension", "status", "reason_code", "message", "details", "evidence_refs"],
+            "properties": {
+              "validator": {"type": "string"},
+              "dimension": {"type": "string"},
+              "status": {"type": "string", "enum": ["PASS", "FAIL", "UNKNOWN", "ERROR"]},
+              "reason_code": {"type": ["string", "null"]},
+              "message": {"type": "string"},
+              "details": {"type": "object"},
+              "evidence_refs": {"type": "array", "items": {"type": "string"}}
+            }
+          }
+        },
+        "summary": {"type": "string"}
+      }
+    },
+    "routing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_route", "observed_route", "match", "evidence_available"],
+      "properties": {
+        "expected_route": {"type": ["string", "null"]},
+        "observed_route": {"type": ["string", "null"]},
+        "match": {"type": ["boolean", "null"]},
+        "evidence_available": {"type": "boolean"}
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["execution_id", "outcome", "started_at", "finished_at", "duration_seconds", "timeout_seconds", "timed_out", "error"],
+      "properties": {
+        "execution_id": {"type": ["string", "null"]},
+        "outcome": {
+          "type": "string",
+          "enum": ["COMPLETED", "TIMEOUT", "ADAPTER_ERROR", "HARNESS_ERROR", "BLOCKED"]
+        },
+        "started_at": {"type": "string"},
+        "finished_at": {"type": "string"},
+        "duration_seconds": {"type": "number"},
+        "timeout_seconds": {"type": "integer"},
+        "timed_out": {"type": "boolean"},
+        "error": {"type": ["string", "null"]}
+      }
+    },
+    "recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resume_supported", "resume_attempted", "resume_outcome"],
+      "properties": {
+        "resume_supported": {"type": "boolean"},
+        "resume_attempted": {"type": "boolean"},
+        "resume_outcome": {"type": ["string", "null"]}
+      }
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "critical_violations", "violations", "durability_violations"],
+      "properties": {
+        "status": {"type": "string", "enum": ["PASS", "FAIL", "UNKNOWN", "ERROR"]},
+        "critical_violations": {"type": "integer", "minimum": 0},
+        "violations": {"type": "array", "items": {"type": "object"}},
+        "durability_violations": {"type": "array", "items": {"type": "object"}}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["captured_channels", "filesystem", "declared", "artifact"],
+      "properties": {
+        "captured_channels": {
+          "type": "object",
+          "additionalProperties": {"type": "boolean"}
+        },
+        "filesystem": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["captured", "added", "modified", "deleted"],
+          "properties": {
+            "captured": {"type": "boolean"},
+            "added": {"type": "array", "items": {"type": "string"}},
+            "modified": {"type": "array", "items": {"type": "string"}},
+            "deleted": {"type": "array", "items": {"type": "string"}}
+          }
+        },
+        "declared": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "message", "claims", "authority"],
+          "properties": {
+            "status": {"type": ["string", "null"]},
+            "message": {"type": ["string", "null"]},
+            "claims": {"type": "array", "items": {"type": "string"}},
+            "authority": {"type": "string", "const": "none"}
+          }
+        },
+        "artifact": {"type": "string"}
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "violations", "unrequested_mutations"],
+      "properties": {
+        "status": {"type": "string", "enum": ["PASS", "FAIL", "UNKNOWN", "ERROR"]},
+        "violations": {"type": "array", "items": {"type": "object"}},
+        "unrequested_mutations": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tokens_in", "tokens_out", "usd", "wall_clock_seconds"],
+      "properties": {
+        "tokens_in": {"type": ["integer", "null"]},
+        "tokens_out": {"type": ["integer", "null"]},
+        "usd": {"type": ["number", "null"]},
+        "wall_clock_seconds": {"type": "number"}
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_dir", "result", "evidence", "trace", "workspace", "manifest"],
+      "properties": {
+        "run_dir": {"type": "string"},
+        "result": {"type": "string"},
+        "evidence": {"type": "string"},
+        "trace": {"type": "string"},
+        "workspace": {"type": "string"},
+        "manifest": {"type": "string"}
+      }
+    }
+  }
+}

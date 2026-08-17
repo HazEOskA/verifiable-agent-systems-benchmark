@@ -1,0 +1,176 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vasb.benchmark/schemas/case.schema.json",
+  "title": "VASB Case",
+  "description": "A single benchmark case. The blocks 'expected', 'forbidden' and 'validators' are the answer key and are NEVER passed to an adapter (Constitution Article 5).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "name",
+    "difficulty",
+    "prompt",
+    "fixture",
+    "permissions",
+    "expected",
+    "forbidden",
+    "validators",
+    "timeout_seconds",
+    "metadata"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9]*-[0-9]{4}$",
+      "description": "Stable case id, e.g. DEV-0001."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "difficulty": {
+      "type": "string",
+      "enum": ["T1", "T2", "T3"]
+    },
+    "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The only task description an adapter receives."
+    },
+    "fixture": {
+      "type": ["string", "null"],
+      "description": "Directory relative to the case dir, copied into the run workspace as the SAME STARTING STATE. null means an empty workspace."
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["write_paths", "network"],
+      "properties": {
+        "write_paths": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Glob patterns, workspace-relative, that the agent is allowed to create or modify."
+        },
+        "read_paths": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "protected_paths": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Existing data that must survive intact. Modification or deletion is a durability (data corruption) event."
+        },
+        "critical_paths": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Paths whose violation is a CRITICAL permission violation and triggers the SAFETY_FAIL gate."
+        },
+        "network": {
+          "type": "string",
+          "enum": ["none", "allowlist", "full"]
+        },
+        "network_allowlist": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "allowed_tools": {
+          "type": ["array", "null"],
+          "items": {"type": "string"},
+          "description": "null means 'not constrained by this case'. It does not mean 'all tools allowed' for reporting purposes."
+        }
+      }
+    },
+    "expected": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "files_changed": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Workspace-relative paths that MUST have been created or modified."
+        },
+        "file_assertions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path"],
+            "properties": {
+              "path": {"type": "string"},
+              "exists": {"type": "boolean"},
+              "equals": {"type": "string"},
+              "contains": {"type": "string"},
+              "not_contains": {"type": "string"},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            }
+          }
+        },
+        "expected_route": {
+          "type": ["string", "null"],
+          "description": "Routing decision the system should have taken. Requires route evidence; without it the case resolves to UNKNOWN."
+        },
+        "expected_state": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "files_present": {"type": "array", "items": {"type": "string"}},
+            "files_absent": {"type": "array", "items": {"type": "string"}}
+          }
+        },
+        "expected_side_effects": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type"],
+            "properties": {
+              "type": {"type": "string"},
+              "target": {"type": ["string", "null"]},
+              "detail": {"type": ["object", "string", "null"]}
+            }
+          },
+          "description": "Non-filesystem effects. Without a capture channel these resolve to UNKNOWN, never PASS."
+        }
+      }
+    },
+    "forbidden": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "changed_files": {"type": "array", "items": {"type": "string"}},
+        "routes": {"type": "array", "items": {"type": "string"}},
+        "tool_calls": {"type": "array", "items": {"type": "string"}},
+        "network": {"type": "array", "items": {"type": "string"}},
+        "paths": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "validators": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1},
+      "description": "Names resolved through the validator registry. Unknown names are a case-loading error."
+    },
+    "timeout_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 86400
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Free-form provenance. Never passed to the adapter as task content.",
+      "properties": {
+        "author": {"type": "string"},
+        "created": {"type": "string"},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "dataset": {"type": "string", "enum": ["public", "dev", "holdout"]},
+        "rationale": {"type": "string"}
+      }
+    }
+  }
+}
