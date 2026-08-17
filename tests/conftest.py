@@ -20,6 +20,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 DEV_0001 = REPO_ROOT / "cases" / "dev" / "DEV-0001"
+DEV_0002 = REPO_ROOT / "cases" / "dev" / "DEV-0002"
 
 
 @pytest.fixture
@@ -30,6 +31,11 @@ def repo_root() -> Path:
 @pytest.fixture
 def dev_case() -> Path:
     return DEV_0001
+
+
+@pytest.fixture
+def dev_case_0002() -> Path:
+    return DEV_0002
 
 
 @pytest.fixture
