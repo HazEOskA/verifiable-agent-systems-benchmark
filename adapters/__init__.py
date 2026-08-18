@@ -79,5 +79,12 @@ def _load_lying() -> type[AgentAdapter]:
     return LyingDummyAdapter
 
 
+def _load_osa() -> type[AgentAdapter]:
+    from adapters.osa.adapter import OSAAdapter
+
+    return OSAAdapter
+
+
 register_adapter("honest", _load_honest)
 register_adapter("lying", _load_lying)
+register_adapter("osa", _load_osa)

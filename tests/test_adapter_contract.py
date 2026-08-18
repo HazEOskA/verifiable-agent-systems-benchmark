@@ -37,7 +37,7 @@ def test_registered_adapters_resolve_to_agent_adapters(spec: str) -> None:
 
 
 def test_registry_lists_both_fixtures() -> None:
-    assert available_adapters() == ["honest", "lying"]
+    assert available_adapters() == ["honest", "lying", "osa"]
 
 
 def test_adapter_resolvable_by_dotted_path() -> None:
@@ -64,7 +64,10 @@ def test_adapter_implements_the_minimum_contract(cls: type[AgentAdapter]) -> Non
 
 @pytest.mark.parametrize("cls", [HonestDummyAdapter, LyingDummyAdapter])
 def test_adapter_lifecycle_runs_end_to_end(
-    cls: type[AgentAdapter], tmp_path: Path, dev_case: Path, make_case_plan: Callable[..., CasePlan]
+    cls: type[AgentAdapter],
+    tmp_path: Path,
+    dev_case: Path,
+    make_case_plan: Callable[..., CasePlan],
 ) -> None:
     case = load_case(dev_case)
     workspace = tmp_path / "workspace"
@@ -86,7 +89,13 @@ def test_adapter_lifecycle_runs_end_to_end(
 def test_case_plan_cannot_carry_the_answer_key() -> None:
     """Constitution Article 5: no expectations, forbidden set or validators reach an adapter."""
     field_names = {f.name for f in dataclasses.fields(CasePlan)}
-    for leaked in ("expected", "forbidden", "validators", "file_assertions", "expected_state"):
+    for leaked in (
+        "expected",
+        "forbidden",
+        "validators",
+        "file_assertions",
+        "expected_state",
+    ):
         assert leaked not in field_names
 
 
@@ -101,9 +110,15 @@ def test_built_case_plan_contains_no_answer_key_values(
     # so the exposed-surface dict is built by hand instead, one field at a time.
     plan_fields = {f.name for f in dataclasses.fields(plan)}
     exposed = json.dumps(
-        {name: getattr(plan, name) for name in plan_fields if name != "trace"}, default=str
+        {name: getattr(plan, name) for name in plan_fields if name != "trace"},
+        default=str,
     )
-    for leaked in ("file_assertions", "expected_state", "files_changed", "expected_side_effects"):
+    for leaked in (
+        "file_assertions",
+        "expected_state",
+        "files_changed",
+        "expected_side_effects",
+    ):
         assert leaked not in exposed
     for validator_name in case.data["validators"]:
         assert f'"{validator_name}"' not in exposed
@@ -139,7 +154,9 @@ def test_resume_is_available_when_declared(
     resumed = adapter.resume(first.execution_id)
     assert adapter.supports_resume is True
     assert resumed.execution_id != first.execution_id
-    assert (workspace / "output" / "result.txt").read_text(encoding="utf-8") == "VASB_OK"
+    assert (workspace / "output" / "result.txt").read_text(
+        encoding="utf-8"
+    ) == "VASB_OK"
 
 
 def test_prompt_directive_parser_extracts_exact_content(dev_case: Path) -> None:

@@ -2,3 +2,12 @@
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
 filterwarnings = ["error::DeprecationWarning"]
+
+[[tool.mypy.overrides]]
+# adapters/osa/_mcp_driver.py is never imported or run under this repo's own
+# interpreter - it is a self-contained payload script executed only under
+# OSA's own venv (which has the `mcp` package this repo deliberately never
+# installs; see adapters/osa/config.py). Type-checking it against VASB's own
+# environment would just report the same absent-dependency error every time.
+module = "adapters.osa._mcp_driver"
+ignore_errors = true
