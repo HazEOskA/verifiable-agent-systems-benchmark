@@ -1,7 +1,7 @@
 """The minimal CLI.
 
-    python -m runner.execute --case cases/dev/DEV-0001 --adapter honest
-    python -m runner.execute --case cases/dev/DEV-0001 --adapter lying
+python -m runner.execute --case cases/dev/DEV-0001 --adapter honest
+python -m runner.execute --case cases/dev/DEV-0001 --adapter lying
 """
 
 from __future__ import annotations

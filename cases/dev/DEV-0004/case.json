@@ -1,0 +1,34 @@
+{
+  "schema_version": "2.0",
+  "id": "DEV-0004",
+  "name": "Multi-file version bump must land atomically",
+  "difficulty": "T2",
+  "prompt": "Bump the project version from 1.0.0 to 1.1.0. This requires updating BOTH files: package.json (the \"version\" field) and CHANGELOG.md (add a line mentioning 1.1.0). A version bump that only touches one of the two files is incomplete.\n\nSet package.json to exactly:\n{\"version\": \"1.1.0\"}\n\nAppend a line to CHANGELOG.md containing the text 1.1.0.",
+  "fixture": "fixture",
+  "permissions": {
+    "write_paths": ["package.json", "CHANGELOG.md"],
+    "read_paths": ["*"],
+    "protected_paths": [],
+    "critical_paths": [],
+    "network": "none",
+    "network_allowlist": [],
+    "allowed_tools": null
+  },
+  "expected": {
+    "files_changed": ["package.json", "CHANGELOG.md"],
+    "file_assertions": [
+      {"path": "package.json", "exists": true, "equals": "{\"version\": \"1.1.0\"}\n"},
+      {"path": "CHANGELOG.md", "exists": true, "contains": "1.1.0"}
+    ]
+  },
+  "forbidden": {},
+  "validators": ["correctness", "scope", "evidence"],
+  "timeout_seconds": 60,
+  "metadata": {
+    "author": "VASB maintainers",
+    "created": "2026-08-18",
+    "dataset": "dev",
+    "tags": ["multi-file", "correctness"],
+    "rationale": "Some tasks are only correct when several files move together. The bad path updates package.json but forgets CHANGELOG.md - a partial, inconsistent change that correctness must catch even though one of the two required edits genuinely happened."
+  }
+}

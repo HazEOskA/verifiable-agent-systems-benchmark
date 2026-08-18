@@ -3,8 +3,9 @@
 Constitution Article 5: validators are the authority for correctness.
 Constitution Article 10.3: no validator may branch on which system is under test.
 The ``ValidationContext`` therefore does not expose the adapter object or its
-name; the only adapter-originated data is ``evidence["declared"]``, which is
-treated as a *claim to be checked*, never as a finding.
+name; the only adapter-originated data is ``evidence["declared"]`` and the
+trace events under ``source: "adapter"``, both treated as *claims to be
+checked*, never as findings.
 """
 
 from __future__ import annotations
@@ -25,6 +26,8 @@ VALIDATOR_STATUSES = (PASS, FAIL, UNKNOWN, ERROR)
 #: Article 9 aggregation precedence. Higher wins.
 STATUS_PRECEDENCE = {PASS: 0, UNKNOWN: 1, FAIL: 2, ERROR: 3}
 
+PERMISSION_OUTCOMES = ("PREVENTED", "DETECTED_VIOLATION", "NO_VIOLATION", "UNKNOWN", "MIXED")
+
 
 @dataclass(frozen=True)
 class ValidationContext:
@@ -33,6 +36,8 @@ class ValidationContext:
     case: Mapping[str, Any]
     evidence: Mapping[str, Any]
     workspace: Path
+
+    # -- case accessors ------------------------------------------------------
 
     @property
     def expected(self) -> Mapping[str, Any]:
@@ -45,6 +50,20 @@ class ValidationContext:
     @property
     def permissions(self) -> Mapping[str, Any]:
         return self.case.get("permissions") or {}
+
+    @property
+    def idempotency_config(self) -> Mapping[str, Any]:
+        return self.case.get("idempotency") or {}
+
+    @property
+    def recovery_config(self) -> Mapping[str, Any]:
+        return self.case.get("recovery") or {}
+
+    @property
+    def rollback_config(self) -> Mapping[str, Any]:
+        return self.case.get("rollback") or {}
+
+    # -- filesystem evidence --------------------------------------------------
 
     @property
     def filesystem(self) -> Mapping[str, Any]:
@@ -78,6 +97,99 @@ class ValidationContext:
 
     def workspace_file_exists(self, rel_path: str) -> bool:
         return (self.workspace / rel_path).is_file()
+
+    # -- structured trace ------------------------------------------------------
+
+    def trace_events(self) -> list[dict[str, Any]]:
+        return list(self.evidence.get("trace") or [])
+
+    def events_of_type(self, event_type: str) -> list[dict[str, Any]]:
+        return [e for e in self.trace_events() if e.get("event_type") == event_type]
+
+    # -- routing ------------------------------------------------------------
+
+    @property
+    def routing(self) -> Mapping[str, Any]:
+        return self.evidence.get("routing") or {}
+
+    @property
+    def routing_captured(self) -> bool:
+        return bool(self.routing.get("captured"))
+
+    def observed_routes(self) -> list[str]:
+        return [
+            e["payload"]["route"]
+            for e in self.events_of_type("ROUTE_SELECTED")
+            if e.get("payload", {}).get("route") is not None
+        ]
+
+    # -- tool calls ---------------------------------------------------------
+
+    @property
+    def tool_calls_captured(self) -> bool:
+        return bool((self.evidence.get("tool_calls") or {}).get("captured")) or bool(
+            self.events_of_type("TOOL_CALL_STARTED")
+        )
+
+    def tool_call_records(self) -> list[dict[str, Any]]:
+        """Pair TOOL_CALL_STARTED/FINISHED events by call_id into one record each."""
+        started = {
+            e["payload"].get("call_id", i): e["payload"]
+            for i, e in enumerate(self.events_of_type("TOOL_CALL_STARTED"))
+        }
+        finished = {
+            e["payload"].get("call_id", i): e["payload"]
+            for i, e in enumerate(self.events_of_type("TOOL_CALL_FINISHED"))
+        }
+        records = []
+        for call_id, start_payload in started.items():
+            fin = finished.get(call_id, {})
+            records.append(
+                {
+                    "call_id": call_id,
+                    "tool": start_payload.get("tool"),
+                    "args": start_payload.get("args", {}),
+                    "success": fin.get("success"),
+                }
+            )
+        return records
+
+    # -- network --------------------------------------------------------------
+
+    @property
+    def network_captured(self) -> bool:
+        return bool((self.evidence.get("network") or {}).get("captured"))
+
+    def network_attempts(self) -> list[dict[str, Any]]:
+        return [e["payload"] for e in self.events_of_type("NETWORK_ATTEMPT")]
+
+    # -- side effects -----------------------------------------------------------
+
+    @property
+    def side_effects_captured(self) -> bool:
+        return bool((self.evidence.get("side_effects") or {}).get("captured"))
+
+    def side_effect_records(self) -> list[dict[str, Any]]:
+        return [e["payload"] for e in self.events_of_type("SIDE_EFFECT")]
+
+    # -- permission / sandbox events -----------------------------------------
+
+    @property
+    def permission_events_captured(self) -> bool:
+        return (
+            bool(self.events_of_type("FILESYSTEM_MUTATION"))
+            or bool(self.events_of_type("NETWORK_ATTEMPT"))
+            or self.fs_captured
+        )
+
+    def fs_mutation_events(self) -> list[dict[str, Any]]:
+        return [e["payload"] for e in self.events_of_type("FILESYSTEM_MUTATION")]
+
+    # -- recovery -------------------------------------------------------------
+
+    @property
+    def recovery(self) -> Mapping[str, Any]:
+        return self.evidence.get("recovery") or {}
 
 
 @dataclass(frozen=True)

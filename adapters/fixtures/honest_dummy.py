@@ -13,8 +13,6 @@ public task text and is given identically to every system.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Sequence
 
 from adapters.base import AdapterRunOutcome, AgentAdapter, CasePlan, TraceEvent
@@ -45,10 +43,6 @@ def parse_file_directives(prompt: str) -> list[tuple[str, str]]:
     return directives
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 class HonestDummyAdapter(AgentAdapter):
     """Does the task, then reports that it did the task."""
 
@@ -63,48 +57,58 @@ class HonestDummyAdapter(AgentAdapter):
 
     def __init__(self) -> None:
         self._plan: CasePlan | None = None
-        self._trace: list[TraceEvent] = []
         self._executions = 0
-        self._shutdown = False
 
     def prepare(self, case: CasePlan) -> None:
         self._plan = case
-        self._trace = [
-            TraceEvent(
-                ts=_now(),
-                type="log",
-                name="prepare",
-                payload={"case_id": case.case_id, "workspace": str(case.workspace)},
-            )
-        ]
 
     def run(self, prompt: str) -> AdapterRunOutcome:
         if self._plan is None:
             raise RuntimeError("run() called before prepare()")
+        plan = self._plan
+        plan.trace.emit("ROUTE_SELECTED", source="adapter", payload={"route": "direct_write"})
 
         self._executions += 1
         execution_id = f"{self.name}-exec-{self._executions}"
-        workspace = Path(self._plan.workspace)
-        tool_calls: list[dict] = []
         written: list[str] = []
+        tool_calls: list[dict] = []
 
         for rel_path, content in parse_file_directives(prompt):
-            target = workspace / rel_path
+            call_id = f"write-{len(tool_calls) + 1}"
+            plan.trace.emit(
+                "TOOL_CALL_STARTED",
+                source="adapter",
+                payload={"call_id": call_id, "tool": "write_file", "args": {"path": rel_path}},
+            )
+            target = plan.workspace / rel_path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
             written.append(rel_path)
-            call = {
-                "tool": "write_file",
-                "args": {"path": rel_path, "bytes": len(content.encode("utf-8"))},
-                "ts": _now(),
-            }
-            tool_calls.append(call)
-            self._trace.append(
-                TraceEvent(ts=call["ts"], type="tool_call", name="write_file", payload=call["args"])
+            plan.trace.emit(
+                "TOOL_CALL_FINISHED",
+                source="adapter",
+                payload={"call_id": call_id, "success": True},
+            )
+            plan.trace.emit(
+                "SIDE_EFFECT",
+                source="adapter",
+                payload={
+                    "id": call_id,
+                    "type": "FILE_WRITE",
+                    "target": rel_path,
+                    "metadata": {"bytes": len(content.encode("utf-8"))},
+                },
+            )
+            tool_calls.append(
+                {"tool": "write_file", "args": {"path": rel_path}, "call_id": call_id}
             )
 
         claim = f"created {len(written)} file(s): {', '.join(written) or 'none'}"
-        self._trace.append(TraceEvent(ts=_now(), type="claim", name="completion", payload={"text": claim}))
+        plan.trace.emit(
+            "CLAIM_DECLARED",
+            source="adapter",
+            payload={"status": "SUCCESS", "message": claim, "claims": [claim]},
+        )
 
         return AdapterRunOutcome(
             execution_id=execution_id,
@@ -114,21 +118,19 @@ class HonestDummyAdapter(AgentAdapter):
             stdout="\n".join(f"wrote {p}" for p in written),
             stderr="",
             tool_calls=tool_calls,
-            observed_route=None,
+            observed_route="direct_write",
         )
 
     def resume(self, execution_id: str) -> AdapterRunOutcome:
         if self._plan is None:
             raise RuntimeError("resume() called before prepare()")
-        self._trace.append(
-            TraceEvent(ts=_now(), type="log", name="resume", payload={"execution_id": execution_id})
+        self._plan.trace.emit(
+            "PROCESS_RESUME", source="adapter", payload={"execution_id": execution_id}
         )
         return self.run(self._plan.prompt)
 
     def collect_trace(self) -> Sequence[TraceEvent]:
-        return list(self._trace)
+        return list(self._plan.trace.events) if self._plan is not None else []
 
     def shutdown(self) -> None:
-        if not self._shutdown:
-            self._shutdown = True
-            self._trace.append(TraceEvent(ts=_now(), type="log", name="shutdown", payload={}))
+        return None

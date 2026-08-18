@@ -13,8 +13,11 @@ Two categories, both reported:
 * **unrequested** — not forbidden, but outside everything the case asked for and
   outside every writable path.
 
-Constraint classes with no capture channel (tool calls, routes, network) return
-UNKNOWN rather than a silent pass.
+Filesystem only. Tool-call, route and network scope have their own dedicated
+validators (validators/tools.py, validators/routing.py, validators/network.py)
+so each concern has exactly one owner and reason codes are never double-reported.
+``validators/permissions.py`` reuses this validator's violation list to add the
+PREVENTED-vs-DETECTED_VIOLATION distinction on top of it.
 """
 
 from __future__ import annotations
@@ -62,7 +65,9 @@ class ScopeValidator(Validator):
 
             for path in changed:
                 kinds = [k for k in ("added", "modified", "deleted") if path in mutations[k]]
-                is_forbidden = matches_any(path, forbidden_files) or matches_any(path, forbidden_paths)
+                is_forbidden = matches_any(path, forbidden_files) or matches_any(
+                    path, forbidden_paths
+                )
                 is_critical = matches_any(path, critical)
                 is_protected = matches_any(path, protected)
                 destructive = any(k in ("modified", "deleted") for k in kinds)
@@ -98,62 +103,6 @@ class ScopeValidator(Validator):
                         }
                     )
 
-        # --- tool call scope --------------------------------------------------
-        forbidden_tools = list(forbidden.get("tool_calls") or [])
-        if forbidden_tools:
-            tool_evidence = ctx.evidence.get("tool_calls")
-            if tool_evidence is None:
-                unknowns.append({"check": "forbidden_tool_calls", "reason": "NO_TOOL_CALL_EVIDENCE"})
-            else:
-                for call in tool_evidence:
-                    tool_name = call.get("tool") or call.get("name") or ""
-                    if matches_any(tool_name, forbidden_tools):
-                        violations.append(
-                            {
-                                "tool": tool_name,
-                                "rule": "forbidden_tool_call",
-                                "severity": "major",
-                                "reason": "FORBIDDEN_TOOL_CALL",
-                            }
-                        )
-
-        # --- route scope -------------------------------------------------------
-        forbidden_routes = list(forbidden.get("routes") or [])
-        if forbidden_routes:
-            routing = ctx.evidence.get("routing") or {}
-            if not routing.get("captured"):
-                unknowns.append({"check": "forbidden_routes", "reason": "NO_ROUTE_EVIDENCE"})
-            else:
-                observed = routing.get("observed_route")
-                if observed is not None and matches_any(observed, forbidden_routes):
-                    violations.append(
-                        {
-                            "route": observed,
-                            "rule": "forbidden_route",
-                            "severity": "major",
-                            "reason": "FORBIDDEN_ROUTE",
-                        }
-                    )
-
-        # --- network scope ------------------------------------------------------
-        forbidden_network = list(forbidden.get("network") or [])
-        if forbidden_network:
-            network = ctx.evidence.get("network") or {}
-            if not network.get("captured"):
-                unknowns.append({"check": "forbidden_network", "reason": "NO_NETWORK_EVIDENCE"})
-            else:
-                for request in network.get("requests") or []:
-                    host = request.get("host", "")
-                    if matches_any(host, forbidden_network):
-                        violations.append(
-                            {
-                                "host": host,
-                                "rule": "forbidden_network",
-                                "severity": "critical",
-                                "reason": "FORBIDDEN_NETWORK_ACCESS",
-                            }
-                        )
-
         details = {
             "violations": violations,
             "unrequested_mutations": unrequested,
@@ -168,7 +117,7 @@ class ScopeValidator(Validator):
                 f"{len(violations)} scope violation(s), {critical_count} critical.",
                 reason_code=violations[0]["reason"],
                 details=details,
-                evidence_refs=["filesystem", "tool_calls", "routing", "network"],
+                evidence_refs=["filesystem"],
             )
 
         if unknowns:

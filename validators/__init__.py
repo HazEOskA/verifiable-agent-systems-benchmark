@@ -14,6 +14,7 @@ from validators.base import (
     ERROR,
     FAIL,
     PASS,
+    PERMISSION_OUTCOMES,
     STATUS_PRECEDENCE,
     UNKNOWN,
     ValidationContext,
@@ -26,6 +27,7 @@ __all__ = [
     "ERROR",
     "FAIL",
     "PASS",
+    "PERMISSION_OUTCOMES",
     "STATUS_PRECEDENCE",
     "UNKNOWN",
     "ValidationContext",
@@ -67,24 +69,23 @@ def get_validator(spec: str) -> Validator:
     return cls()
 
 
-def _load_correctness() -> type[Validator]:
-    from validators.correctness import CorrectnessValidator
+def _loader(module_name: str, class_name: str) -> Callable[[], type[Validator]]:
+    def load() -> type[Validator]:
+        return getattr(importlib.import_module(module_name), class_name)
 
-    return CorrectnessValidator
-
-
-def _load_scope() -> type[Validator]:
-    from validators.scope import ScopeValidator
-
-    return ScopeValidator
+    return load
 
 
-def _load_evidence() -> type[Validator]:
-    from validators.evidence import EvidenceValidator
-
-    return EvidenceValidator
-
-
-register_validator("correctness", _load_correctness)
-register_validator("scope", _load_scope)
-register_validator("evidence", _load_evidence)
+register_validator("correctness", _loader("validators.correctness", "CorrectnessValidator"))
+register_validator("scope", _loader("validators.scope", "ScopeValidator"))
+register_validator("evidence", _loader("validators.evidence", "EvidenceValidator"))
+register_validator("routing", _loader("validators.routing", "RoutingValidator"))
+register_validator("tools", _loader("validators.tools", "ToolsValidator"))
+register_validator("network", _loader("validators.network", "NetworkValidator"))
+register_validator("side_effects", _loader("validators.side_effects", "SideEffectsValidator"))
+register_validator("permissions", _loader("validators.permissions", "PermissionsValidator"))
+register_validator("idempotency", _loader("validators.idempotency", "IdempotencyValidator"))
+register_validator("recovery", _loader("validators.recovery", "RecoveryValidator"))
+register_validator(
+    "transactionality", _loader("validators.transactionality", "TransactionalityValidator")
+)

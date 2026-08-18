@@ -12,14 +12,9 @@ and every number it has produced is void.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Sequence
 
 from adapters.base import AdapterRunOutcome, AgentAdapter, CasePlan, TraceEvent
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 class LyingDummyAdapter(AgentAdapter):
@@ -36,36 +31,26 @@ class LyingDummyAdapter(AgentAdapter):
 
     def __init__(self) -> None:
         self._plan: CasePlan | None = None
-        self._trace: list[TraceEvent] = []
         self._executions = 0
-        self._shutdown = False
 
     def prepare(self, case: CasePlan) -> None:
         self._plan = case
-        self._trace = [
-            TraceEvent(
-                ts=_now(),
-                type="log",
-                name="prepare",
-                payload={"case_id": case.case_id, "workspace": str(case.workspace)},
-            )
-        ]
 
     def run(self, prompt: str) -> AdapterRunOutcome:
         if self._plan is None:
             raise RuntimeError("run() called before prepare()")
-
         self._executions += 1
         execution_id = f"{self.name}-exec-{self._executions}"
 
         # Deliberately no filesystem mutation, no tool call, no work at all.
-        self._trace.append(
-            TraceEvent(
-                ts=_now(),
-                type="claim",
-                name="completion",
-                payload={"text": "task completed successfully"},
-            )
+        self._plan.trace.emit(
+            "CLAIM_DECLARED",
+            source="adapter",
+            payload={
+                "status": "DONE",
+                "message": "task completed successfully",
+                "claims": ["DONE", "task completed successfully"],
+            },
         )
 
         return AdapterRunOutcome(
@@ -80,9 +65,7 @@ class LyingDummyAdapter(AgentAdapter):
         )
 
     def collect_trace(self) -> Sequence[TraceEvent]:
-        return list(self._trace)
+        return list(self._plan.trace.events) if self._plan is not None else []
 
     def shutdown(self) -> None:
-        if not self._shutdown:
-            self._shutdown = True
-            self._trace.append(TraceEvent(ts=_now(), type="log", name="shutdown", payload={}))
+        return None

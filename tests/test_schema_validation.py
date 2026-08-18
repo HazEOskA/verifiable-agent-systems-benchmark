@@ -63,8 +63,19 @@ def test_malformed_case_documents_are_rejected(
 
 @pytest.mark.parametrize(
     "missing_field",
-    ["id", "name", "difficulty", "prompt", "fixture", "permissions", "expected",
-     "forbidden", "validators", "timeout_seconds", "metadata"],
+    [
+        "id",
+        "name",
+        "difficulty",
+        "prompt",
+        "fixture",
+        "permissions",
+        "expected",
+        "forbidden",
+        "validators",
+        "timeout_seconds",
+        "metadata",
+    ],
 )
 def test_case_missing_required_field_is_rejected(dev_case: Path, missing_field: str) -> None:
     data = copy.deepcopy(load_case(dev_case).data)
@@ -140,8 +151,20 @@ def test_result_schema_rejects_invented_status(dev_case: Path, reports_dir: Path
 def test_result_schema_requires_every_top_level_block(dev_case: Path, reports_dir: Path) -> None:
     result = run_case(dev_case, "honest", reports_dir=reports_dir)
     for block in (
-        "benchmark", "case", "system", "model", "environment", "result", "routing",
-        "execution", "recovery", "permissions", "evidence", "scope", "cost", "artifacts",
+        "benchmark",
+        "case",
+        "system",
+        "model",
+        "environment",
+        "result",
+        "routing",
+        "execution",
+        "recovery",
+        "permissions",
+        "evidence",
+        "scope",
+        "cost",
+        "artifacts",
     ):
         assert block in result
         tampered = copy.deepcopy(result)
@@ -162,8 +185,14 @@ def test_release_identity_fields_are_present(dev_case: Path, reports_dir: Path) 
     """Constitution Article 8: a result missing these is not citable."""
     result = run_case(dev_case, "honest", reports_dir=reports_dir)
     benchmark = result["benchmark"]
-    for field in ("benchmark_version", "dataset_hash", "runner_hash", "validator_hash",
-                  "policy_hash", "run_id"):
+    for field in (
+        "benchmark_version",
+        "dataset_hash",
+        "runner_hash",
+        "validator_hash",
+        "policy_hash",
+        "run_id",
+    ):
         assert benchmark[field], f"{field} must be populated"
     assert "benchmark_commit" in benchmark
     assert result["environment"]["fingerprint"]

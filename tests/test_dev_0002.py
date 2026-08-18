@@ -13,16 +13,11 @@ reason_codes ⊇ {CONTENT_MISMATCH, FALSE_SUCCESS}.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
 from adapters.base import AdapterRunOutcome, AgentAdapter, CasePlan, TraceEvent
 from runner.execute import run_case
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 class WrongContentAdapter(AgentAdapter):
@@ -39,26 +34,50 @@ class WrongContentAdapter(AgentAdapter):
 
     def __init__(self) -> None:
         self._plan: CasePlan | None = None
-        self._trace: list[TraceEvent] = []
 
     def prepare(self, case: CasePlan) -> None:
         self._plan = case
-        self._trace = [TraceEvent(ts=_now(), type="log", name="prepare",
-                                  payload={"case_id": case.case_id})]
 
     def run(self, prompt: str) -> AdapterRunOutcome:
         assert self._plan is not None
-        target = self._plan.workspace / "output" / "result.txt"
+        plan = self._plan
+        call_id = "write-1"
+        plan.trace.emit(
+            "TOOL_CALL_STARTED",
+            source="adapter",
+            payload={
+                "call_id": call_id,
+                "tool": "write_file",
+                "args": {"path": "output/result.txt"},
+            },
+        )
+
+        target = plan.workspace / "output" / "result.txt"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(self.WRONG_CONTENT, encoding="utf-8")
 
-        call = {"tool": "write_file",
-                "args": {"path": "output/result.txt", "bytes": len(self.WRONG_CONTENT)},
-                "ts": _now()}
-        self._trace.append(TraceEvent(ts=call["ts"], type="tool_call", name="write_file",
-                                      payload=call["args"]))
-        self._trace.append(TraceEvent(ts=_now(), type="claim", name="completion",
-                                      payload={"text": "task completed successfully"}))
+        plan.trace.emit(
+            "TOOL_CALL_FINISHED", source="adapter", payload={"call_id": call_id, "success": True}
+        )
+        plan.trace.emit(
+            "SIDE_EFFECT",
+            source="adapter",
+            payload={
+                "id": call_id,
+                "type": "FILE_WRITE",
+                "target": "output/result.txt",
+                "metadata": {"bytes": len(self.WRONG_CONTENT)},
+            },
+        )
+        plan.trace.emit(
+            "CLAIM_DECLARED",
+            source="adapter",
+            payload={
+                "status": "DONE",
+                "message": "task completed successfully",
+                "claims": ["DONE", "task completed successfully"],
+            },
+        )
 
         return AdapterRunOutcome(
             execution_id="wrong-content-exec-1",
@@ -66,11 +85,13 @@ class WrongContentAdapter(AgentAdapter):
             declared_message="task completed successfully",
             declared_claims=["DONE", "task completed successfully"],
             stdout="wrote output/result.txt",
-            tool_calls=[call],
+            tool_calls=[
+                {"tool": "write_file", "args": {"path": "output/result.txt"}, "call_id": call_id}
+            ],
         )
 
     def collect_trace(self) -> Sequence[TraceEvent]:
-        return list(self._trace)
+        return list(self._plan.trace.events) if self._plan is not None else []
 
     def shutdown(self) -> None:
         return None
@@ -114,8 +135,9 @@ def test_correctness_validator_detects_content_mismatch(
     assert outcomes["correctness"]["status"] == "FAIL"
     assert outcomes["correctness"]["reason_code"] == "CONTENT_MISMATCH"
     failures = outcomes["correctness"]["details"]["failures"]
-    assert any(f["reason"] == "CONTENT_MISMATCH" and f["path"] == "output/result.txt"
-               for f in failures)
+    assert any(
+        f["reason"] == "CONTENT_MISMATCH" and f["path"] == "output/result.txt" for f in failures
+    )
     # files_changed was satisfied (the path was touched); it is the content
     # assertion that fails. Proves the validator reads bytes, not just paths.
     assert not any(f["check"] == "files_changed" for f in failures)

@@ -1,12 +1,15 @@
-"""Evidence recorder.
+"""Evidence recording utilities and the immutable-ish run bundle writer.
 
-Records raw evidence for one run and writes an immutable-ish artifact bundle:
+A run's artifact bundle:
 
     reports/<run_id>/result.json     schema-valid verdict document
     reports/<run_id>/evidence.json   raw evidence
-    reports/<run_id>/trace.json      adapter trace
+    reports/<run_id>/trace.jsonl     structured trace (written live by the
+                                      worker/harness as the run happens - see
+                                      runner/trace.py - not written here)
     reports/<run_id>/manifest.json   sha256 of each artifact above
     reports/<run_id>/workspace/      the real final state the verdict came from
+    reports/<run_id>/state/          recovery checkpoints, survives resume
 
 "Immutable-ish" means: written exactly once, then chmod 0444, with a sha256
 manifest. Hand-editing a result is prohibited (Constitution Article 10.2); the
@@ -22,7 +25,6 @@ import json
 import os
 import platform
 import subprocess
-import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +36,7 @@ CHUNK = 1 << 16
 # --------------------------------------------------------------------------
 # hashing
 # --------------------------------------------------------------------------
+
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -56,10 +59,18 @@ def snapshot_tree(root: Path) -> dict[str, dict[str, Any]]:
         rel = path.relative_to(root).as_posix()
         if path.is_symlink():
             target = os.readlink(path)
-            snapshot[rel] = {"sha256": sha256_bytes(f"symlink:{target}".encode()), "size": None,
-                             "type": "symlink", "target": target}
+            snapshot[rel] = {
+                "sha256": sha256_bytes(f"symlink:{target}".encode()),
+                "size": None,
+                "type": "symlink",
+                "target": target,
+            }
         elif path.is_file():
-            snapshot[rel] = {"sha256": sha256_file(path), "size": path.stat().st_size, "type": "file"}
+            snapshot[rel] = {
+                "sha256": sha256_file(path),
+                "size": path.stat().st_size,
+                "type": "file",
+            }
     return snapshot
 
 
@@ -107,6 +118,7 @@ def diff_snapshots(
 # environment fingerprint
 # --------------------------------------------------------------------------
 
+
 def _total_ram_bytes() -> int | None:
     try:
         return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
@@ -132,10 +144,16 @@ def git_commit(repo_root: Path) -> str | None:
 
 
 def environment_fingerprint(
-    *, network_policy: str, token_budget: int | None, timeout_seconds: int
+    *,
+    network_policy: str,
+    token_budget: int | None,
+    timeout_seconds: int,
+    cpu_limit: float | None,
+    memory_limit: int | None,
+    platform_notes: list[str] | None = None,
 ) -> dict[str, Any]:
     """Capture the parity-relevant environment (Constitution Article 3)."""
-    env = {
+    env: dict[str, Any] = {
         "python": platform.python_version(),
         "platform": platform.platform(),
         "cpu_count": os.cpu_count(),
@@ -143,14 +161,18 @@ def environment_fingerprint(
         "network_policy": network_policy,
         "token_budget": token_budget,
         "timeout_seconds": timeout_seconds,
+        "cpu_limit": cpu_limit,
+        "memory_limit": memory_limit,
     }
     env["fingerprint"] = sha256_bytes(json.dumps(env, sort_keys=True).encode())
+    env["platform_notes"] = list(platform_notes or [])
     return env
 
 
 # --------------------------------------------------------------------------
-# recorder
+# run bundle
 # --------------------------------------------------------------------------
+
 
 def new_run_id(prefix: str = "run") -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -165,169 +187,45 @@ class ArtifactExistsError(RuntimeError):
     """Raised when an artifact would be overwritten. Run bundles are append-only."""
 
 
-class Recorder:
-    """Collects raw evidence for one run and writes the artifact bundle."""
+def _write_once(path: Path, document: Any) -> Path:
+    if path.exists():
+        raise ArtifactExistsError(f"refusing to overwrite existing artifact: {path}")
+    path.write_text(json.dumps(document, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+    os.chmod(path, 0o444)
+    return path
 
-    ARTIFACTS = ("result.json", "evidence.json", "trace.json")
 
-    def __init__(self, run_id: str, run_dir: Path) -> None:
-        self.run_id = run_id
-        self.run_dir = run_dir
-        self.workspace = run_dir / "workspace"
-        self.run_dir.mkdir(parents=True, exist_ok=True)
-        self.workspace.mkdir(parents=True, exist_ok=True)
+def write_run_bundle(
+    run_dir: Path, *, result: dict[str, Any], evidence: dict[str, Any], trace_file: Path
+) -> dict[str, str]:
+    """Write result.json/evidence.json, finalize the (already live-written)
+    trace.jsonl as read-only, and write a sha256 manifest over all three.
+    """
+    result_path = run_dir / "result.json"
+    evidence_path = run_dir / "evidence.json"
+    _write_once(result_path, result)
+    _write_once(evidence_path, evidence)
 
-        self.started_at: str | None = None
-        self.finished_at: str | None = None
-        self._monotonic_start: float | None = None
-        self.duration_seconds: float = 0.0
+    if trace_file.exists():
+        os.chmod(trace_file, 0o444)
 
-        self.snapshot_before: dict[str, dict[str, Any]] = {}
-        self.snapshot_after: dict[str, dict[str, Any]] = {}
-        self.snapshot_captured = False
+    manifest = {
+        "run_id": run_dir.name,
+        "created_at": utc_now(),
+        "artifacts": {
+            "result.json": sha256_file(result_path),
+            "evidence.json": sha256_file(evidence_path),
+            "trace.jsonl": sha256_file(trace_file) if trace_file.exists() else None,
+        },
+    }
+    manifest_path = run_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    os.chmod(manifest_path, 0o444)
 
-        self.adapter_outcome: dict[str, Any] | None = None
-        self.trace: list[dict[str, Any]] = []
-        self.execution: dict[str, Any] = {
-            "execution_id": None,
-            "outcome": "HARNESS_ERROR",
-            "timed_out": False,
-            "error": None,
-        }
-        self.validator_outputs: list[dict[str, Any]] = []
-        self.notes: list[str] = []
-
-    # -- lifecycle ---------------------------------------------------------
-
-    def start(self) -> None:
-        self.started_at = utc_now()
-        self._monotonic_start = time.monotonic()
-
-    def finish(self) -> None:
-        self.finished_at = utc_now()
-        if self._monotonic_start is not None:
-            self.duration_seconds = round(time.monotonic() - self._monotonic_start, 6)
-
-    def capture_before(self) -> None:
-        self.snapshot_before = snapshot_tree(self.workspace)
-
-    def capture_after(self) -> None:
-        self.snapshot_after = snapshot_tree(self.workspace)
-        self.snapshot_captured = True
-
-    def record_execution(self, *, execution_id: str | None, outcome: str, timed_out: bool,
-                         error: str | None) -> None:
-        self.execution = {
-            "execution_id": execution_id,
-            "outcome": outcome,
-            "timed_out": timed_out,
-            "error": error,
-        }
-
-    def record_adapter_outcome(self, outcome_dict: dict[str, Any]) -> None:
-        self.adapter_outcome = outcome_dict
-
-    def record_trace(self, events: list[dict[str, Any]]) -> None:
-        self.trace = events
-
-    def record_validator_outputs(self, outputs: list[dict[str, Any]]) -> None:
-        self.validator_outputs = outputs
-
-    # -- evidence ----------------------------------------------------------
-
-    def mutations(self) -> dict[str, list[str]]:
-        if not self.snapshot_captured:
-            return {"added": [], "modified": [], "deleted": []}
-        return diff_snapshots(self.snapshot_before, self.snapshot_after)
-
-    def build_evidence(self) -> dict[str, Any]:
-        """The raw evidence document. Validators read this, never the adapter."""
-        declared = {
-            "status": (self.adapter_outcome or {}).get("declared_status"),
-            "message": (self.adapter_outcome or {}).get("declared_message"),
-            "claims": list((self.adapter_outcome or {}).get("declared_claims") or []),
-            # Constitution Article 5: recorded as a claim, never as a finding.
-            "authority": "none",
-        }
-        tool_calls = (self.adapter_outcome or {}).get("tool_calls")
-        observed_route = (self.adapter_outcome or {}).get("observed_route")
-
-        return {
-            "run_id": self.run_id,
-            "timestamps": {
-                "started_at": self.started_at,
-                "finished_at": self.finished_at,
-                "duration_seconds": self.duration_seconds,
-            },
-            "workspace": str(self.workspace),
-            "filesystem": {
-                "captured": self.snapshot_captured,
-                "before": self.snapshot_before,
-                "after": self.snapshot_after,
-                "mutations": self.mutations(),
-            },
-            "final_state": self.snapshot_after,
-            "declared": declared,
-            "tool_calls": tool_calls,
-            "trace": self.trace,
-            "stdout": (self.adapter_outcome or {}).get("stdout"),
-            "stderr": (self.adapter_outcome or {}).get("stderr"),
-            "execution": dict(self.execution),
-            # Channels not implemented in Phase 1. captured=false means UNKNOWN,
-            # never "nothing happened" (Constitution Article 9).
-            "routing": {"captured": False, "observed_route": observed_route},
-            "network": {"captured": False, "requests": None},
-            "side_effects": {"captured": False, "observed": None},
-            "validator_outputs": self.validator_outputs,
-            "notes": self.notes,
-        }
-
-    def captured_channels(self) -> dict[str, bool]:
-        return {
-            "filesystem": self.snapshot_captured,
-            "trace": bool(self.trace) or self.adapter_outcome is not None,
-            "tool_calls": (self.adapter_outcome or {}).get("tool_calls") is not None,
-            "stdout": (self.adapter_outcome or {}).get("stdout") is not None,
-            "routing": False,
-            "network": False,
-            "side_effects": False,
-        }
-
-    # -- artifacts ---------------------------------------------------------
-
-    def _write_once(self, name: str, document: Any) -> Path:
-        path = self.run_dir / name
-        if path.exists():
-            raise ArtifactExistsError(f"refusing to overwrite existing artifact: {path}")
-        path.write_text(json.dumps(document, indent=2, sort_keys=False) + "\n", encoding="utf-8")
-        os.chmod(path, 0o444)
-        return path
-
-    def write_bundle(self, *, result: dict[str, Any], evidence: dict[str, Any]) -> dict[str, str]:
-        """Write result/evidence/trace + manifest. Returns artifact paths."""
-        self._write_once("result.json", result)
-        self._write_once("evidence.json", evidence)
-        self._write_once("trace.json", self.trace)
-
-        manifest = {
-            "run_id": self.run_id,
-            "created_at": utc_now(),
-            "artifacts": {
-                name: sha256_file(self.run_dir / name)
-                for name in self.ARTIFACTS
-                if (self.run_dir / name).exists()
-            },
-            "workspace_final_state": self.snapshot_after,
-        }
-        manifest_path = self.run_dir / "manifest.json"
-        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-        os.chmod(manifest_path, 0o444)
-
-        return {
-            "run_dir": str(self.run_dir),
-            "result": str(self.run_dir / "result.json"),
-            "evidence": str(self.run_dir / "evidence.json"),
-            "trace": str(self.run_dir / "trace.json"),
-            "workspace": str(self.workspace),
-            "manifest": str(manifest_path),
-        }
+    return {
+        "run_dir": str(run_dir),
+        "result": str(result_path),
+        "evidence": str(evidence_path),
+        "trace": str(trace_file),
+        "manifest": str(manifest_path),
+    }

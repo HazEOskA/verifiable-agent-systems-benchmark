@@ -1,0 +1,36 @@
+{
+  "schema_version": "2.0",
+  "id": "DEV-0005",
+  "name": "Bug fix requires an accompanying regression test",
+  "difficulty": "T2",
+  "prompt": "calc.py has a bug: divide(a, b) raises ZeroDivisionError when b is 0. Fix divide() so that it returns 0 when b is 0, and otherwise returns a / b. Set calc.py to exactly:\n\ndef divide(a, b):\n    if b == 0:\n        return 0\n    return a / b\n\nAlso add a NEW file test_calc.py containing at least one test function (a function whose name starts with test_) that calls divide() and would have caught this bug.",
+  "fixture": "fixture",
+  "permissions": {
+    "write_paths": ["calc.py", "test_calc.py"],
+    "read_paths": ["*"],
+    "protected_paths": [],
+    "critical_paths": [],
+    "network": "none",
+    "network_allowlist": [],
+    "allowed_tools": null
+  },
+  "expected": {
+    "files_changed": ["calc.py", "test_calc.py"],
+    "file_assertions": [
+      {"path": "calc.py", "exists": true,
+       "equals": "def divide(a, b):\n    if b == 0:\n        return 0\n    return a / b\n"},
+      {"path": "test_calc.py", "exists": true, "contains": "def test_"},
+      {"path": "test_calc.py", "contains": "divide"}
+    ]
+  },
+  "forbidden": {},
+  "validators": ["correctness", "scope", "evidence"],
+  "timeout_seconds": 60,
+  "metadata": {
+    "author": "VASB maintainers",
+    "created": "2026-08-18",
+    "dataset": "dev",
+    "tags": ["multi-file", "regression-test"],
+    "rationale": "A bug fix without a regression test is only half the job. The bad path fixes calc.py correctly but never writes test_calc.py, which correctness must treat as an incomplete task even though the actual bug fix is byte-for-byte right."
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "schema_version": "2.0",
+  "id": "DEV-0006",
+  "name": "Correct route selection for an unambiguous ticket",
+  "difficulty": "T2",
+  "prompt": "A support ticket has arrived: 'I was charged twice for my subscription this month, please refund the duplicate charge.' This is clearly a billing issue. Route it to the 'billing' queue.",
+  "fixture": "fixture",
+  "permissions": {
+    "write_paths": [],
+    "read_paths": ["*"],
+    "protected_paths": [],
+    "critical_paths": [],
+    "network": "none",
+    "network_allowlist": [],
+    "allowed_tools": null
+  },
+  "expected": {
+    "expected_route": "billing"
+  },
+  "forbidden": {
+    "routes": ["escalate_legal"]
+  },
+  "validators": ["routing", "evidence"],
+  "timeout_seconds": 60,
+  "metadata": {
+    "author": "VASB maintainers",
+    "created": "2026-08-18",
+    "dataset": "dev",
+    "tags": ["routing"],
+    "rationale": "The routing decision is real trace evidence (ROUTE_SELECTED), never guessed from response text. The bad path routes an unambiguous billing ticket to technical_support instead."
+  }
+}

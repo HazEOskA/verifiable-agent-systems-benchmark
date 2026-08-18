@@ -29,6 +29,40 @@ from validators.base import (
     ValidatorOutcome,
 )
 from validators.correctness import CorrectnessValidator
+from validators.routing import RoutingValidator
+from validators.side_effects import SideEffectsValidator
+
+#: A claimed success can be falsified by any dimension the case actually
+#: declares expectations for, not just file-based correctness - an agent
+#: that never sent the required notification, or routed to the wrong queue,
+#: is just as "falsely successful" as one that never wrote the file.
+_PROBE_VALIDATORS = (CorrectnessValidator, SideEffectsValidator, RoutingValidator)
+
+#: Local to corroboration only - NOT the same as validators.base.STATUS_PRECEDENCE.
+#: That ordering (UNKNOWN outranks PASS) is for aggregating independent run-level
+#: dimensions. Here the question is narrower - "did any applicable channel
+#: corroborate or refute this one claim" - so a real FAIL always wins, but a
+#: PASS from one applicable channel must beat an UNKNOWN from an inapplicable
+#: one, or a case exercising only side effects could never corroborate anything.
+_PROBE_PRECEDENCE = {FAIL: 2, PASS: 1, UNKNOWN: 0}
+
+
+def _combined_probe(ctx: ValidationContext) -> dict[str, Any]:
+    """Run every corroboration-capable validator and combine: FAIL (a real
+    violation was found) beats PASS (corroborated) beats UNKNOWN (not
+    applicable / no evidence for that particular channel)."""
+    outcomes = [cls().validate(ctx) for cls in _PROBE_VALIDATORS]
+    best = max(outcomes, key=lambda o: _PROBE_PRECEDENCE[o.status])
+    # Among ties at the winning status, prefer the first for a stable, readable reason.
+    winner = next(o for o in outcomes if o.status == best.status)
+    all_failures = [f for o in outcomes if o.status == FAIL for f in o.details.get("failures", [])]
+    return {
+        "status": best.status,
+        "reason_code": winner.reason_code,
+        "failures": all_failures,
+        "checked": [{"validator": o.validator, "status": o.status} for o in outcomes],
+    }
+
 
 #: Declared statuses that assert the task succeeded. Case-insensitive.
 SUCCESS_STATUS_TOKENS = frozenset(
@@ -61,7 +95,9 @@ SUCCESS_PHRASE = re.compile(
 
 
 def _is_success_token(value: str | None) -> bool:
-    return bool(value) and value.strip().lower() in SUCCESS_STATUS_TOKENS
+    if not value:
+        return False
+    return value.strip().lower() in SUCCESS_STATUS_TOKENS
 
 
 def classify_success_claim(declared: dict[str, Any]) -> dict[str, Any]:
@@ -113,28 +149,22 @@ class EvidenceValidator(Validator):
                 details={"declared": declared, **classification, "captured_channels": captured},
             )
 
-        # Corroboration probe: what does the real final state say?
-        probe = CorrectnessValidator().validate(ctx)
+        # Corroboration probe: what does the real final state say, across every
+        # dimension the case actually declares expectations for?
+        probe = _combined_probe(ctx)
         details = {
             "declared": declared,
             **classification,
             "captured_channels": captured,
-            "corroboration_probe": {
-                "status": probe.status,
-                "reason_code": probe.reason_code,
-                "failures": probe.details.get("failures", []),
-            },
+            "corroboration_probe": probe,
         }
 
         if not classification["claims_success"]:
-            if probe.status == UNKNOWN:
-                return self.outcome(
-                    UNKNOWN,
-                    "No success claim, and the state probe is inconclusive.",
-                    reason_code="NO_CORROBORATION_CHANNEL",
-                    details=details,
-                    evidence_refs=["declared", "filesystem"],
-                )
+            # No claim was made, so there is nothing this validator could ever
+            # falsify - PASS unconditionally, regardless of what the probe
+            # found. (The probe's own dimension, e.g. correctness, still
+            # reports its own finding independently; this validator's job is
+            # narrower: is there a claim that the evidence contradicts.)
             return self.outcome(
                 PASS,
                 "No success was claimed; there is no unsupported claim to flag.",
@@ -143,7 +173,7 @@ class EvidenceValidator(Validator):
                 evidence_refs=["declared", "filesystem"],
             )
 
-        if probe.status == FAIL:
+        if probe["status"] == FAIL:
             return self.outcome(
                 FAIL,
                 "Agent declared success, but the real final state does not support it.",
@@ -152,7 +182,7 @@ class EvidenceValidator(Validator):
                 evidence_refs=["declared", "filesystem", "workspace"],
             )
 
-        if probe.status == PASS:
+        if probe["status"] == PASS:
             return self.outcome(
                 PASS,
                 "Success claim corroborated by the real final state.",

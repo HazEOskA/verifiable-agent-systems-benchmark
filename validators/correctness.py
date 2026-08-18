@@ -6,7 +6,9 @@ It never reads ``evidence["declared"]``. An agent that declares PASS and an agen
 that declares nothing are graded by exactly the same measurement.
 
 Vacuous PASS is impossible: a case with nothing to check returns UNKNOWN.
-Missing capture channels (routing, side effects) return UNKNOWN, never PASS.
+Filesystem-only: ``expected_route`` and ``expected_side_effects`` have their own
+dedicated validators (validators/routing.py, validators/side_effects.py) so
+each concern has exactly one owner and reason codes are never double-reported.
 """
 
 from __future__ import annotations
@@ -30,12 +32,8 @@ class CorrectnessValidator(Validator):
         files_changed = list(expected.get("files_changed") or [])
         file_assertions = list(expected.get("file_assertions") or [])
         expected_state = expected.get("expected_state") or {}
-        expected_route = expected.get("expected_route")
-        side_effects = list(expected.get("expected_side_effects") or [])
 
-        has_expectations = bool(
-            files_changed or file_assertions or expected_state or expected_route or side_effects
-        )
+        has_expectations = bool(files_changed or file_assertions or expected_state)
         if not has_expectations:
             return self.outcome(
                 UNKNOWN,
@@ -78,38 +76,6 @@ class CorrectnessValidator(Validator):
             checks.append(record)
             if not ok:
                 failures.append({**record, "reason": "UNEXPECTED_ARTIFACT"})
-
-        # --- routing --------------------------------------------------------
-        if expected_route is not None:
-            routing = ctx.evidence.get("routing") or {}
-            if not routing.get("captured"):
-                unknowns.append({"check": "expected_route", "reason": "NO_ROUTE_EVIDENCE"})
-            else:
-                observed = routing.get("observed_route")
-                ok = observed == expected_route
-                record = {
-                    "check": "expected_route",
-                    "expected": expected_route,
-                    "observed": observed,
-                    "ok": ok,
-                }
-                checks.append(record)
-                if not ok:
-                    failures.append({**record, "reason": "ROUTE_MISMATCH"})
-
-        # --- non-filesystem side effects ------------------------------------
-        if side_effects:
-            effects_evidence = ctx.evidence.get("side_effects") or {}
-            if not effects_evidence.get("captured"):
-                unknowns.append({"check": "expected_side_effects", "reason": "NO_SIDE_EFFECT_EVIDENCE"})
-            else:
-                observed = effects_evidence.get("observed") or []
-                for effect in side_effects:
-                    ok = effect in observed
-                    record = {"check": "expected_side_effects", "effect": effect, "ok": ok}
-                    checks.append(record)
-                    if not ok:
-                        failures.append({**record, "reason": "MISSING_SIDE_EFFECT"})
 
         details = {"checks": checks, "failures": failures, "unknowns": unknowns}
 
@@ -157,7 +123,12 @@ class CorrectnessValidator(Validator):
         exists = ctx.workspace_file_exists(rel)
 
         want_exists = assertion.get("exists", True)
-        record = {"check": "exists", "path": rel, "expected": want_exists, "ok": exists == want_exists}
+        record = {
+            "check": "exists",
+            "path": rel,
+            "expected": want_exists,
+            "ok": exists == want_exists,
+        }
         checks.append(record)
         if not record["ok"]:
             failures.append(

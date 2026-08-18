@@ -19,6 +19,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from adapters.base import CasePlan  # noqa: E402
+from runner.loader import LoadedCase  # noqa: E402
+from runner.trace import TraceRecorder  # noqa: E402
+
 DEV_0001 = REPO_ROOT / "cases" / "dev" / "DEV-0001"
 DEV_0002 = REPO_ROOT / "cases" / "dev" / "DEV-0002"
 
@@ -77,6 +81,42 @@ def make_case(tmp_path: Path) -> Callable[..., Path]:
 
         (case_dir / "case.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
         return case_dir
+
+    return factory
+
+
+@pytest.fixture
+def make_case_plan(tmp_path: Path) -> Callable[..., CasePlan]:
+    """Build a CasePlan directly, for unit-testing an adapter without going
+    through the subprocess harness. Each call gets a fresh in-memory
+    TraceRecorder (no sink file - these tests don't need a JSONL trace) and
+    its own state_dir, mirroring what runner.worker builds for real.
+    """
+
+    def factory(
+        case: LoadedCase,
+        workspace: Path,
+        *,
+        execution_id: str = "test-exec-1",
+        resume_of: str | None = None,
+    ) -> CasePlan:
+        data = case.data
+        state_dir = tmp_path / f"state-{execution_id}"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        return CasePlan(
+            case_id=data["id"],
+            name=data["name"],
+            difficulty=data["difficulty"],
+            prompt=data["prompt"],
+            workspace=workspace,
+            permissions=dict(data["permissions"]),
+            timeout_seconds=data["timeout_seconds"],
+            trace=TraceRecorder(sink_path=None),
+            state_dir=state_dir,
+            execution_id=execution_id,
+            resume_of=resume_of,
+            metadata=dict(data.get("metadata") or {}),
+        )
 
     return factory
 

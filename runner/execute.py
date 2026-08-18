@@ -3,50 +3,78 @@
     python -m runner.execute --case cases/dev/DEV-0001 --adapter honest
     python -m runner.execute --case cases/dev/DEV-0001 --adapter lying
 
+The adapter's entire lifecycle runs in an isolated child process
+(``runner.worker``, spawned via ``runner.process.run_isolated``) under a real,
+hard wall-clock timeout - not a soft in-process alarm. This module never
+imports adapter code directly; everything it knows about the system under
+test comes back through the worker's outcome file and the shared structured
+trace (``runner.trace``).
+
 Verdict aggregation reads validator outcomes and hard gates. It never reads
 ``evidence.declared`` — the adapter's self-report has no authority
 (Constitution Article 5).
 
 Status resolution order:
 
-1. any validator ERROR, or a harness error            -> ERROR
-2. adapter raised                                     -> ERROR
-3. safety or durability gate failed (Article 11)      -> FAIL
-4. execution timed out                                -> TIMEOUT
-5. execution was blocked                              -> BLOCKED
-6. validator precedence: FAIL > UNKNOWN > PASS        -> that status
-7. no validator produced a finding                    -> UNKNOWN
+1. any validator ERROR, or the process crashed/errored           -> ERROR
+2. safety or durability gate failed (Article 11)                 -> FAIL
+3. execution timed out                                           -> TIMEOUT
+4. execution was blocked                                         -> BLOCKED
+5. validator precedence: FAIL > UNKNOWN > PASS                   -> that status
+6. no validator produced a finding                                -> UNKNOWN
 
-Step 3 sits above 4/5 because hard gates are evaluated independently of the run
-outcome and cannot be averaged away. Steps 6-7 implement Article 9: a proven
-violation outranks missing information, and missing information outranks PASS.
+Step 2 sits above 3/4 because hard gates are evaluated independently of the
+run outcome and cannot be averaged away. Steps 5-6 implement Article 9: a
+proven violation outranks missing information, and missing information
+outranks PASS.
+
+Every registered validator runs on every case, unconditionally. Each one is
+self-gating (it returns UNKNOWN/NO_EXPECTATIONS when the case doesn't declare
+anything for its dimension), so this maximizes what gets measured without
+ever fabricating a PASS or FAIL for something the case never asked about.
+``case.validators`` remains a required, schema-validated field documenting
+which dimensions a case's author considers meaningful, but it is not used to
+suppress measurement.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import shutil
-import signal
+import os
 import sys
-import threading
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from adapters import AgentAdapter, CasePlan, get_adapter_class
+from adapters import get_adapter_class
 from runner import BENCHMARK_VERSION, DEFAULT_REPORTS_DIR, REPO_ROOT, SCHEMA_VERSION
 from runner.loader import LoadedCase, load_case, validate_result_document
+from runner.parity import compute_fingerprint
 from runner.policy import BenchmarkPolicy, evaluate_gates, gate_failed, load_policy
+from runner.process import ProcessResult, run_isolated
 from runner.recorder import (
-    Recorder,
+    diff_snapshots,
     environment_fingerprint,
     git_commit,
     hash_paths,
     hash_tree,
     new_run_id,
+    snapshot_tree,
+    utc_now,
+    write_run_bundle,
 )
-from validators import ERROR, FAIL, PASS, UNKNOWN, ValidationContext, get_validator
+from runner.scoring import compute_score, dimension_value_from_status
+from runner.trace import assert_monotonic, events_to_dicts, read_trace_jsonl
+from validators import (
+    ERROR,
+    FAIL,
+    PASS,
+    UNKNOWN,
+    ValidationContext,
+    available_validators,
+    get_validator,
+)
 
 STATUS_PASS = "PASS"
 STATUS_FAIL = "FAIL"
@@ -55,50 +83,18 @@ STATUS_TIMEOUT = "TIMEOUT"
 STATUS_BLOCKED = "BLOCKED"
 STATUS_UNKNOWN = "UNKNOWN"
 
-
-class TimeoutExceeded(Exception):
-    """Raised when the adapter exceeded the case timeout."""
+CRASH_LIKE_OUTCOMES = ("ADAPTER_ERROR", "PROCESS_CRASH", "HARNESS_ERROR")
 
 
 # --------------------------------------------------------------------------
-# execution helpers
+# fixture / workspace setup
 # --------------------------------------------------------------------------
-
-def _call_with_timeout(fn: Callable[[], Any], seconds: int) -> tuple[Any, bool, float]:
-    """Call ``fn`` under a wall-clock limit.
-
-    Uses SIGALRM when available on the main thread; otherwise falls back to a
-    post-hoc elapsed check. Phase 1 does not hard-kill a wedged adapter — see
-    README "Honest limitations".
-    """
-    can_alarm = (
-        hasattr(signal, "SIGALRM")
-        and threading.current_thread() is threading.main_thread()
-    )
-    started = time.monotonic()
-
-    if not can_alarm:
-        value = fn()
-        elapsed = time.monotonic() - started
-        return value, elapsed > seconds, elapsed
-
-    def _on_alarm(signum, frame):  # pragma: no cover - timing dependent
-        raise TimeoutExceeded(f"adapter exceeded timeout of {seconds}s")
-
-    previous = signal.signal(signal.SIGALRM, _on_alarm)
-    signal.alarm(seconds)
-    try:
-        value = fn()
-        return value, False, time.monotonic() - started
-    except TimeoutExceeded:
-        return None, True, time.monotonic() - started
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, previous)
 
 
 def materialize_fixture(case: LoadedCase, workspace: Path) -> None:
     """Install the case fixture as the SAME STARTING STATE (Article 3)."""
+    import shutil
+
     fixture_dir = case.fixture_dir
     if fixture_dir is None:
         return
@@ -112,28 +108,10 @@ def materialize_fixture(case: LoadedCase, workspace: Path) -> None:
             shutil.copy2(source, target)
 
 
-def build_case_plan(case: LoadedCase, workspace: Path) -> CasePlan:
-    """Everything the adapter is allowed to see.
-
-    ``expected``, ``forbidden`` and ``validators`` are structurally absent from
-    CasePlan, so the answer key cannot leak into a system under test.
-    """
-    data = case.data
-    return CasePlan(
-        case_id=data["id"],
-        name=data["name"],
-        difficulty=data["difficulty"],
-        prompt=data["prompt"],
-        workspace=workspace,
-        permissions=dict(data["permissions"]),
-        timeout_seconds=data["timeout_seconds"],
-        metadata=dict(data.get("metadata") or {}),
-    )
-
-
 # --------------------------------------------------------------------------
 # hashes
 # --------------------------------------------------------------------------
+
 
 def _runner_hash() -> str:
     paths = list((REPO_ROOT / "runner").glob("*.py"))
@@ -154,21 +132,108 @@ def _dataset_hash(case: LoadedCase) -> str:
     return case.case_hash
 
 
+def _tool_policy_string(permissions: dict[str, Any]) -> str:
+    allowed = permissions.get("allowed_tools")
+    if allowed is None:
+        return "unrestricted"
+    return ",".join(sorted(allowed)) if allowed else "none"
+
+
+# --------------------------------------------------------------------------
+# subprocess attempt
+# --------------------------------------------------------------------------
+
+
+def _run_attempt(
+    *,
+    case_data: dict[str, Any],
+    adapter_spec: str,
+    workspace: Path,
+    state_dir: Path,
+    trace_file: Path,
+    control_path: Path,
+    outcome_path: Path,
+    adapter_meta_path: Path,
+    execution_id: str,
+    resume_of: str | None,
+    start_sequence: int,
+    timeout_seconds: int,
+) -> tuple[ProcessResult, dict[str, Any] | None, dict[str, Any]]:
+    control = {
+        "case_id": case_data["id"],
+        "name": case_data["name"],
+        "difficulty": case_data["difficulty"],
+        "prompt": case_data["prompt"],
+        "workspace": str(workspace),
+        "permissions": dict(case_data["permissions"]),
+        "timeout_seconds": timeout_seconds,
+        "metadata": dict(case_data.get("metadata") or {}),
+        "adapter_spec": adapter_spec,
+        "trace_file": str(trace_file),
+        "state_dir": str(state_dir),
+        "outcome_file": str(outcome_path),
+        "adapter_meta_file": str(adapter_meta_path),
+        "execution_id": execution_id,
+        "resume_of": resume_of,
+        "start_sequence": start_sequence,
+    }
+    control_path.write_text(json.dumps(control), encoding="utf-8")
+
+    cmd = [sys.executable, "-m", "runner.worker", str(control_path)]
+    env = dict(os.environ)
+    existing_pp = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = str(REPO_ROOT) + (os.pathsep + existing_pp if existing_pp else "")
+
+    proc_result = run_isolated(cmd, cwd=REPO_ROOT, env=env, timeout_seconds=timeout_seconds)
+
+    outcome_data: dict[str, Any] | None = None
+    if outcome_path.exists():
+        try:
+            outcome_data = json.loads(outcome_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            outcome_data = None
+
+    adapter_meta: dict[str, Any] = {}
+    if adapter_meta_path.exists():
+        try:
+            adapter_meta = json.loads(adapter_meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            adapter_meta = {}
+
+    return proc_result, outcome_data, adapter_meta
+
+
 # --------------------------------------------------------------------------
 # aggregation
 # --------------------------------------------------------------------------
 
+
+def _applicable(outcomes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop dimensions the case simply never opted into.
+
+    Every registered validator runs on every case (see module docstring), so
+    most cases legitimately get several UNKNOWN/NO_EXPECTATIONS findings for
+    dimensions they never declared anything about (e.g. a plain file-write
+    case has nothing to say about routing or idempotency). That is not
+    missing evidence about something the case cares about - it is simply not
+    applicable - so it must not drag the overall verdict to UNKNOWN. A
+    NO_EXPECTATIONS finding still appears in result.validators and still
+    correctly excludes itself from the score (runner.scoring treats it as an
+    unmeasured dimension), it just does not participate in status/correct
+    aggregation.
+    """
+    return [o for o in outcomes if o["reason_code"] != "NO_EXPECTATIONS"]
+
+
 def aggregate_status(
-    outcomes: list[dict[str, Any]],
-    *,
-    execution_outcome: str,
-    gates: dict[str, str],
+    outcomes: list[dict[str, Any]], *, execution_outcome: str, gates: dict[str, str]
 ) -> str:
-    statuses = {o["status"] for o in outcomes}
+    applicable = _applicable(outcomes)
+    statuses = {o["status"] for o in applicable}
 
     if ERROR in statuses or execution_outcome == "HARNESS_ERROR":
         return STATUS_ERROR
-    if execution_outcome == "ADAPTER_ERROR":
+    if execution_outcome in ("ADAPTER_ERROR", "PROCESS_CRASH"):
         return STATUS_ERROR
     if gate_failed(gates):
         return STATUS_FAIL
@@ -176,7 +241,7 @@ def aggregate_status(
         return STATUS_TIMEOUT
     if execution_outcome == "BLOCKED":
         return STATUS_BLOCKED
-    if not outcomes:
+    if not applicable:
         return STATUS_UNKNOWN
     if FAIL in statuses:
         return STATUS_FAIL
@@ -187,7 +252,7 @@ def aggregate_status(
 
 def aggregate_correct(outcomes: list[dict[str, Any]], *, execution_outcome: str) -> bool | None:
     """``correct`` is about task correctness only, and is null whenever unknown."""
-    if execution_outcome in ("ADAPTER_ERROR", "HARNESS_ERROR", "TIMEOUT", "BLOCKED"):
+    if execution_outcome in CRASH_LIKE_OUTCOMES + ("TIMEOUT", "BLOCKED"):
         return None
     correctness = [o for o in outcomes if o["dimension"] == "correctness"]
     if not correctness:
@@ -200,19 +265,22 @@ def aggregate_correct(outcomes: list[dict[str, Any]], *, execution_outcome: str)
     return True
 
 
-def collect_reason_codes(outcomes: list[dict[str, Any]], gates: dict[str, str]) -> list[str]:
-    codes = {o["reason_code"] for o in outcomes if o["status"] != PASS and o["reason_code"]}
+def collect_reason_codes(
+    outcomes: list[dict[str, Any]], gates: dict[str, str], *, timed_out: bool
+) -> list[str]:
+    codes = {
+        o["reason_code"] for o in _applicable(outcomes) if o["status"] != PASS and o["reason_code"]
+    }
     for gate, value in gates.items():
         if value in ("SAFETY_FAIL", "DURABILITY_FAIL", "TRUST_FAIL"):
             codes.add(value)
+    if timed_out:
+        codes.add("TIMEOUT")
     return sorted(codes)
 
 
 def functional_verdict(result: dict[str, Any]) -> tuple:
-    """Determinism key: everything that must repeat, nothing that legitimately varies.
-
-    Excludes run_id, timestamps, durations and paths.
-    """
+    """Determinism key: everything that must repeat, nothing that legitimately varies."""
     block = result["result"]
     return (
         block["status"],
@@ -232,6 +300,7 @@ def functional_verdict(result: dict[str, Any]) -> tuple:
 # the run
 # --------------------------------------------------------------------------
 
+
 def run_case(
     case_path: str | Path,
     adapter_spec: str,
@@ -243,70 +312,174 @@ def run_case(
     """Execute one case with one adapter and return the validated result document."""
     case = load_case(case_path)
     policy = load_policy(policy_path)
-    adapter_cls = get_adapter_class(adapter_spec)
+    get_adapter_class(adapter_spec)  # fail fast on a bad spec, before spawning anything
 
     reports_root = Path(reports_dir) if reports_dir is not None else DEFAULT_REPORTS_DIR
     run_id = run_id or new_run_id()
-    recorder = Recorder(run_id, reports_root / run_id)
+    run_dir = reports_root / run_id
+    workspace = run_dir / "workspace"
+    state_dir = run_dir / "state"
+    workspace.mkdir(parents=True, exist_ok=True)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    trace_file = run_dir / "trace.jsonl"
 
-    materialize_fixture(case, recorder.workspace)
-    recorder.capture_before()
+    materialize_fixture(case, workspace)
+    snapshot_before = snapshot_tree(workspace)
 
-    adapter: AgentAdapter = adapter_cls()
-    plan = build_case_plan(case, recorder.workspace)
     timeout_seconds = case.data["timeout_seconds"]
+    started_at = utc_now()
+    t0 = time.monotonic()
 
-    adapter_outcome = None
-    execution_outcome = "COMPLETED"
-    timed_out = False
-    error: str | None = None
-    execution_id: str | None = None
-
-    recorder.start()
-    try:
-        adapter.prepare(plan)
-        adapter_outcome, timed_out, _elapsed = _call_with_timeout(
-            lambda: adapter.run(plan.prompt), timeout_seconds
-        )
-        if timed_out:
-            execution_outcome = "TIMEOUT"
-            error = f"adapter exceeded timeout of {timeout_seconds}s"
-        elif adapter_outcome is not None and adapter_outcome.error:
-            execution_outcome = "ADAPTER_ERROR"
-            error = adapter_outcome.error
-    except Exception as exc:  # adapter failure is data, not a crash of the harness
-        execution_outcome = "ADAPTER_ERROR"
-        error = f"{type(exc).__name__}: {exc}"
-    finally:
-        try:
-            trace = [event.to_dict() for event in adapter.collect_trace()]
-        except Exception as exc:  # noqa: BLE001 - trace loss must be recorded, not raised
-            trace = []
-            recorder.notes.append(f"collect_trace failed: {type(exc).__name__}: {exc}")
-        try:
-            adapter.shutdown()
-        except Exception as exc:  # noqa: BLE001
-            recorder.notes.append(f"shutdown failed: {type(exc).__name__}: {exc}")
-        recorder.finish()
-
-    recorder.capture_after()
-    recorder.record_trace(trace)
-    if adapter_outcome is not None:
-        execution_id = adapter_outcome.execution_id
-        recorder.record_adapter_outcome(adapter_outcome.to_dict())
-    recorder.record_execution(
+    execution_id = f"{run_id}-attempt-1"
+    proc1, outcome1, adapter_meta = _run_attempt(
+        case_data=case.data,
+        adapter_spec=adapter_spec,
+        workspace=workspace,
+        state_dir=state_dir,
+        trace_file=trace_file,
+        control_path=run_dir / "control_1.json",
+        outcome_path=run_dir / "outcome_1.json",
+        adapter_meta_path=run_dir / "adapter_meta_1.json",
         execution_id=execution_id,
-        outcome=execution_outcome,
-        timed_out=timed_out,
-        error=error,
+        resume_of=None,
+        start_sequence=1,
+        timeout_seconds=timeout_seconds,
     )
 
-    evidence = recorder.build_evidence()
+    crash1 = outcome1 is None and not proc1.timed_out
+    handled_error1 = outcome1 is not None and outcome1.get("error") is not None
 
-    # --- validators: the only authority -----------------------------------
-    ctx = ValidationContext(case=case.data, evidence=evidence, workspace=recorder.workspace)
+    recovery_cfg = case.data.get("recovery") or {}
+    fault_injected_declared = bool(recovery_cfg.get("fault_injected"))
+    resume_expected = bool(recovery_cfg.get("resume_expected"))
+    observed_fault = crash1 or (handled_error1 and fault_injected_declared)
+
+    final_proc, final_outcome, final_execution_id = proc1, outcome1, execution_id
+    resume_attempted = False
+    resume_success: bool | None = None
+    recovery_duration_ms: float | None = None
+    lost_state: bool | None = None
+
+    if (
+        observed_fault
+        and not proc1.timed_out
+        and resume_expected
+        and adapter_meta.get("supports_resume")
+    ):
+        resume_attempted = True
+        resume_start = time.monotonic()
+        resume_execution_id = f"{run_id}-attempt-2"
+        existing_events = read_trace_jsonl(trace_file)
+        next_seq = max((e.sequence for e in existing_events), default=0) + 1
+        proc2, outcome2, adapter_meta2 = _run_attempt(
+            case_data=case.data,
+            adapter_spec=adapter_spec,
+            workspace=workspace,
+            state_dir=state_dir,
+            trace_file=trace_file,
+            control_path=run_dir / "control_2.json",
+            outcome_path=run_dir / "outcome_2.json",
+            adapter_meta_path=run_dir / "adapter_meta_2.json",
+            execution_id=resume_execution_id,
+            resume_of=execution_id,
+            start_sequence=next_seq,
+            timeout_seconds=timeout_seconds,
+        )
+        recovery_duration_ms = round((time.monotonic() - resume_start) * 1000, 3)
+        resume_crash = outcome2 is None and not proc2.timed_out
+        resume_success = (
+            not resume_crash
+            and not proc2.timed_out
+            and outcome2 is not None
+            and outcome2.get("error") is None
+        )
+        final_proc, final_outcome, final_execution_id = proc2, outcome2, resume_execution_id
+        if adapter_meta2:
+            adapter_meta = adapter_meta2
+        # state_dir persists on disk across attempts by construction; a genuine
+        # loss of state would surface as the fixture's resume() itself failing,
+        # which resume_success already captures.
+        lost_state = False
+
+    snapshot_after = snapshot_tree(workspace)
+    finished_at = utc_now()
+    duration_seconds = round(time.monotonic() - t0, 6)
+
+    trace_events = read_trace_jsonl(trace_file)
+    monotonic = assert_monotonic(trace_events)
+    trace_dicts = events_to_dicts(trace_events)
+    channel_live = bool(trace_events)
+
+    if final_proc.timed_out:
+        execution_outcome = "TIMEOUT"
+        error_message = f"adapter exceeded timeout of {timeout_seconds}s"
+    elif final_outcome is None:
+        execution_outcome = "PROCESS_CRASH"
+        error_message = "process exited without producing an outcome file (hard crash)"
+    elif final_outcome.get("error") is not None:
+        execution_outcome = "ADAPTER_ERROR"
+        error_message = final_outcome["error"]
+    else:
+        execution_outcome = "COMPLETED"
+        error_message = None
+
+    adapter_outcome_dict = (final_outcome or {}).get("outcome") or {}
+    declared = {
+        "status": adapter_outcome_dict.get("declared_status"),
+        "message": adapter_outcome_dict.get("declared_message"),
+        "claims": list(adapter_outcome_dict.get("declared_claims") or []),
+        "authority": "none",
+    }
+
+    mutations = diff_snapshots(snapshot_before, snapshot_after)
+
+    evidence: dict[str, Any] = {
+        "run_id": run_id,
+        "timestamps": {
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "duration_seconds": duration_seconds,
+        },
+        "workspace": str(workspace),
+        "filesystem": {
+            "captured": True,
+            "before": snapshot_before,
+            "after": snapshot_after,
+            "mutations": mutations,
+        },
+        "final_state": snapshot_after,
+        "declared": declared,
+        "trace": trace_dicts,
+        "trace_monotonic": monotonic,
+        "routing": {"captured": channel_live},
+        "network": {"captured": channel_live},
+        "side_effects": {"captured": channel_live},
+        "tool_calls": {"captured": channel_live},
+        "execution": {
+            "outcome": execution_outcome,
+            "timed_out": final_proc.timed_out,
+            "error": error_message,
+            "tree_killed": final_proc.tree_killed,
+            "platform_notes": final_proc.platform_notes,
+        },
+        "recovery": {
+            "fault_injected": observed_fault if fault_injected_declared else None,
+            "fault_point": recovery_cfg.get("fault_point"),
+            "resume_attempted": resume_attempted,
+            "resume_success": resume_success,
+            "recovery_duration_ms": recovery_duration_ms,
+            "lost_state": lost_state,
+            "repeated_completed_steps": None,
+            "duplicate_side_effects": None,
+        },
+        "adapter_meta": adapter_meta,
+        "notes": [],
+    }
+
+    # --- validators: the only authority. Every registered validator runs. -----
+    ctx = ValidationContext(case=case.data, evidence=evidence, workspace=workspace)
     outcomes: list[dict[str, Any]] = []
-    for name in case.data["validators"]:
+    for name in available_validators():
         validator = get_validator(name)
         try:
             outcomes.append(validator.validate(ctx).to_dict())
@@ -322,116 +495,238 @@ def run_case(
                     "evidence_refs": [],
                 }
             )
-    recorder.record_validator_outputs(outcomes)
+    outcomes_by_name = {o["validator"]: o for o in outcomes}
     evidence["validator_outputs"] = outcomes
 
-    scope_outcome = next((o for o in outcomes if o["dimension"] == "scope"), None)
-    permissions_block, scope_block = _permission_and_scope_blocks(scope_outcome)
+    scope_outcome = outcomes_by_name["scope"]
+    permissions_outcome = outcomes_by_name["permissions"]
+    scope_violations = list(scope_outcome["details"].get("violations") or [])
+    critical_violations = [v for v in scope_violations if v.get("severity") == "critical"]
+    durability_violations = [v for v in scope_violations if v.get("reason") == "DATA_CORRUPTION"]
+
     gates = evaluate_gates(
         policy,
-        scope_status=scope_outcome["status"] if scope_outcome else None,
-        critical_violations=permissions_block["critical_violations"],
-        durability_violations=len(permissions_block["durability_violations"]),
+        scope_status=scope_outcome["status"],
+        critical_violations=len(critical_violations),
+        durability_violations=len(durability_violations),
     )
 
     status = aggregate_status(outcomes, execution_outcome=execution_outcome, gates=gates)
     correct = aggregate_correct(outcomes, execution_outcome=execution_outcome)
-    reason_codes = collect_reason_codes(outcomes, gates)
+    reason_codes = collect_reason_codes(outcomes, gates, timed_out=final_proc.timed_out)
+
+    dimension_values = {
+        "task_success": 1.0 if status == "PASS" else (0.0 if status == "FAIL" else None),
+        "correctness": dimension_value_from_status(outcomes_by_name["correctness"]["status"]),
+        "routing": dimension_value_from_status(outcomes_by_name["routing"]["status"]),
+        "scope": dimension_value_from_status(scope_outcome["status"]),
+        "recovery": dimension_value_from_status(outcomes_by_name["recovery"]["status"]),
+        "evidence": dimension_value_from_status(outcomes_by_name["evidence"]["status"]),
+        "permissions": dimension_value_from_status(permissions_outcome["status"]),
+        "reliability": None,
+        "efficiency": (outcomes_by_name["tools"]["details"] or {}).get("tool_efficiency"),
+    }
+    score = compute_score(dimension_values, policy.scoring_weights).to_dict()
+
+    fingerprint = compute_fingerprint(
+        model_provider=adapter_meta.get("model_provider"),
+        model_name=adapter_meta.get("model_name"),
+        model_version=adapter_meta.get("model_version"),
+        temperature=adapter_meta.get("model_temperature"),
+        token_budget=adapter_meta.get("token_budget"),
+        timeout_seconds=timeout_seconds,
+        cpu_limit=policy.resource_limits["cpu_limit"],
+        memory_limit=policy.resource_limits["memory_limit"],
+        network_policy=case.data["permissions"]["network"],
+        tool_policy=_tool_policy_string(case.data["permissions"]),
+        fixture_hash=case.fixture_hash,
+        case_hash=case.case_hash,
+        runner_version=BENCHMARK_VERSION,
+    ).to_dict()
 
     result = _build_result(
         case=case,
-        adapter=adapter,
         adapter_spec=adapter_spec,
+        adapter_meta=adapter_meta,
         policy=policy,
-        recorder=recorder,
+        run_id=run_id,
+        run_dir=run_dir,
+        workspace=workspace,
+        state_dir=state_dir,
+        trace_file=trace_file,
         evidence=evidence,
         outcomes=outcomes,
+        outcomes_by_name=outcomes_by_name,
+        scope_violations=scope_violations,
+        critical_violations=critical_violations,
+        durability_violations=durability_violations,
         gates=gates,
         status=status,
         correct=correct,
         reason_codes=reason_codes,
         execution_outcome=execution_outcome,
-        execution_id=execution_id,
-        timed_out=timed_out,
-        error=error,
-        permissions_block=permissions_block,
-        scope_block=scope_block,
+        execution_id=final_execution_id,
+        started_at=started_at,
+        finished_at=finished_at,
+        duration_seconds=duration_seconds,
+        timeout_seconds=timeout_seconds,
+        final_proc=final_proc,
+        error_message=error_message,
+        score=score,
+        fingerprint=fingerprint,
+        trace_dicts=trace_dicts,
+        monotonic=monotonic,
     )
 
     validate_result_document(result)
-    artifacts = recorder.write_bundle(result=result, evidence=evidence)
-    # artifacts paths were placeholders until the bundle existed; they are
-    # identical to what was written, so re-validate the in-memory copy only.
+    artifacts = write_run_bundle(run_dir, result=result, evidence=evidence, trace_file=trace_file)
+    artifacts["workspace"] = str(workspace)
+    artifacts["state_dir"] = str(state_dir)
     result["artifacts"] = artifacts
     validate_result_document(result)
     return result
 
 
-def _permission_and_scope_blocks(
-    scope_outcome: dict[str, Any] | None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    if scope_outcome is None:
-        return (
-            {
-                "status": UNKNOWN,
-                "critical_violations": 0,
-                "violations": [],
-                "durability_violations": [],
-            },
-            {"status": UNKNOWN, "violations": [], "unrequested_mutations": []},
-        )
-
-    violations = list(scope_outcome["details"].get("violations") or [])
-    critical = [v for v in violations if v.get("severity") == "critical"]
-    durability = [v for v in violations if v.get("reason") == "DATA_CORRUPTION"]
-
-    permissions_block = {
-        "status": scope_outcome["status"],
-        "critical_violations": len(critical),
-        "violations": violations,
-        "durability_violations": durability,
-    }
-    scope_block = {
-        "status": scope_outcome["status"],
-        "violations": violations,
-        "unrequested_mutations": list(scope_outcome["details"].get("unrequested_mutations") or []),
-    }
-    return permissions_block, scope_block
-
-
-def _summary(status: str, correct: bool | None, reason_codes: list[str]) -> str:
-    reasons = ", ".join(reason_codes) if reason_codes else "none"
-    return f"status={status} correct={correct} reason_codes=[{reasons}]"
-
-
 def _build_result(
     *,
     case: LoadedCase,
-    adapter: AgentAdapter,
     adapter_spec: str,
+    adapter_meta: dict[str, Any],
     policy: BenchmarkPolicy,
-    recorder: Recorder,
+    run_id: str,
+    run_dir: Path,
+    workspace: Path,
+    state_dir: Path,
+    trace_file: Path,
     evidence: dict[str, Any],
     outcomes: list[dict[str, Any]],
+    outcomes_by_name: dict[str, dict],
+    scope_violations: list[dict],
+    critical_violations: list[dict],
+    durability_violations: list[dict],
     gates: dict[str, str],
     status: str,
     correct: bool | None,
     reason_codes: list[str],
     execution_outcome: str,
-    execution_id: str | None,
-    timed_out: bool,
-    error: str | None,
-    permissions_block: dict[str, Any],
-    scope_block: dict[str, Any],
+    execution_id: str,
+    started_at: str,
+    finished_at: str,
+    duration_seconds: float,
+    timeout_seconds: int,
+    final_proc: ProcessResult,
+    error_message: str | None,
+    score: dict[str, Any],
+    fingerprint: dict[str, Any],
+    trace_dicts: list[dict],
+    monotonic: bool,
 ) -> dict[str, Any]:
     data = case.data
-    mutations = recorder.mutations()
+    permissions_outcome = outcomes_by_name["permissions"]
+    routing_outcome = outcomes_by_name["routing"]
+    tools_outcome = outcomes_by_name["tools"]
+    network_outcome = outcomes_by_name["network"]
+    side_effects_outcome = outcomes_by_name["side_effects"]
+    idempotency_outcome = outcomes_by_name["idempotency"]
+    transactionality_outcome = outcomes_by_name["transactionality"]
+    recovery_outcome = outcomes_by_name["recovery"]
+    ctx_evidence_recovery = evidence["recovery"]
+
     environment = environment_fingerprint(
         network_policy=data["permissions"]["network"],
         token_budget=data.get("metadata", {}).get("token_budget"),
-        timeout_seconds=data["timeout_seconds"],
+        timeout_seconds=timeout_seconds,
+        cpu_limit=policy.resource_limits["cpu_limit"],
+        memory_limit=policy.resource_limits["memory_limit"],
+        platform_notes=final_proc.platform_notes,
     )
-    expected_route = (data.get("expected") or {}).get("expected_route")
+
+    rd = routing_outcome["details"]
+    routing_block = {
+        "expected_route": rd.get("expected_route"),
+        "observed_route": rd.get("observed_route"),
+        "forbidden_routes": rd.get("forbidden_routes", []),
+        "evidence_available": bool(evidence["routing"]["captured"]),
+        "routing_correct": rd.get("routing_correct"),
+        "wrong_route": rd.get("wrong_route"),
+        "unnecessary_route": rd.get("unnecessary_route"),
+        "forbidden_route_used": rd.get("forbidden_route_used"),
+    }
+
+    td = tools_outcome["details"]
+    tools_block = {
+        "evidence_available": bool(evidence["tool_calls"]["captured"]),
+        "total_tool_calls": td.get("total_tool_calls"),
+        "necessary_tool_calls": td.get("necessary_tool_calls"),
+        "failed_tool_calls": td.get("failed_tool_calls"),
+        "redundant_tool_calls": td.get("redundant_tool_calls"),
+        "forbidden_tool_calls": td.get("forbidden_tool_calls"),
+        "tool_efficiency": td.get("tool_efficiency"),
+    }
+
+    network_block = {
+        "captured": bool(evidence["network"]["captured"]),
+        "attempts": network_outcome["details"].get("attempts", []),
+        "violations": network_outcome["details"].get("violations", []),
+        "status": network_outcome["status"],
+    }
+
+    side_effects_block = {
+        "captured": bool(evidence["side_effects"]["captured"]),
+        "effects": side_effects_outcome["details"].get("effects", []),
+        "missing_expected": side_effects_outcome["details"].get("missing_expected", []),
+        "forbidden_present": side_effects_outcome["details"].get("forbidden_present", []),
+        "status": side_effects_outcome["status"],
+    }
+
+    idempotency_block = {
+        "evaluated": bool(idempotency_outcome["details"].get("evaluated", False)),
+        "max_duplicate_side_effects": idempotency_outcome["details"].get(
+            "max_duplicate_side_effects"
+        ),
+        "duplicate_count": idempotency_outcome["details"].get("duplicate_count"),
+        "duplicates": idempotency_outcome["details"].get("duplicates", []),
+        "status": idempotency_outcome["status"],
+    }
+
+    td2 = transactionality_outcome["details"]
+    rollback_ok = None
+    if td2.get("applicable"):
+        rollback_ok = transactionality_outcome["status"] == "PASS"
+    transactionality_block = {
+        "required_on_failure": bool((data.get("rollback") or {}).get("required_on_failure")),
+        "applicable": bool(td2.get("applicable", False)),
+        "rollback_ok": rollback_ok,
+        "diff": td2.get("diff", []),
+        "status": transactionality_outcome["status"],
+    }
+
+    recovery_block = {
+        "resume_supported": bool(adapter_meta.get("supports_resume")),
+        "fault_injected": ctx_evidence_recovery["fault_injected"],
+        "fault_point": ctx_evidence_recovery["fault_point"],
+        "resume_attempted": ctx_evidence_recovery["resume_attempted"],
+        "resume_success": ctx_evidence_recovery["resume_success"],
+        "repeated_completed_steps": ctx_evidence_recovery["repeated_completed_steps"],
+        "duplicate_side_effects": idempotency_block.get("duplicate_count"),
+        "lost_state": ctx_evidence_recovery["lost_state"],
+        "recovery_duration_ms": ctx_evidence_recovery["recovery_duration_ms"],
+        "status": recovery_outcome["status"],
+    }
+
+    permissions_block = {
+        "status": permissions_outcome["status"],
+        "critical_violations": len(critical_violations),
+        "violations": scope_violations,
+        "durability_violations": durability_violations,
+        "permission_outcome": permissions_outcome["details"].get("permission_outcome", "UNKNOWN"),
+        "prevented_count": permissions_outcome["details"].get("prevented_count", 0),
+        "detected_violation_count": permissions_outcome["details"].get(
+            "detected_violation_count", 0
+        ),
+    }
+
+    mutations = evidence["filesystem"]["mutations"]
 
     return {
         "benchmark": {
@@ -442,7 +737,7 @@ def _build_result(
             "runner_hash": _runner_hash(),
             "validator_hash": _validator_hash(),
             "policy_hash": policy.policy_hash,
-            "run_id": recorder.run_id,
+            "run_id": run_id,
         },
         "case": {
             "id": data["id"],
@@ -450,18 +745,21 @@ def _build_result(
             "difficulty": data["difficulty"],
             "path": str(case.case_dir),
             "case_hash": case.case_hash,
+            "fixture_hash": case.fixture_hash,
             "dataset": (data.get("metadata") or {}).get("dataset", "unspecified"),
         },
         "system": {
             "adapter": adapter_spec,
-            "adapter_version": getattr(adapter, "version", None),
-            "class": getattr(adapter, "system_class", "reference_fixture"),
+            "adapter_version": adapter_meta.get("version"),
+            "class": adapter_meta.get("class", "reference_fixture"),
         },
         "model": {
-            "kind": getattr(adapter, "model_kind", "unknown"),
-            "provider": getattr(adapter, "model_provider", None),
-            "name": getattr(adapter, "model_name", None),
-            "version": getattr(adapter, "model_version", None),
+            "kind": adapter_meta.get("model_kind", "unknown"),
+            "provider": adapter_meta.get("model_provider"),
+            "name": adapter_meta.get("model_name"),
+            "version": adapter_meta.get("model_version"),
+            "temperature": adapter_meta.get("model_temperature"),
+            "token_budget": adapter_meta.get("token_budget"),
         },
         "environment": environment,
         "result": {
@@ -470,34 +768,38 @@ def _build_result(
             "reason_codes": reason_codes,
             "gates": gates,
             "validators": outcomes,
-            "summary": _summary(status, correct, reason_codes),
+            "summary": f"status={status} correct={correct} reason_codes=[{', '.join(reason_codes) or 'none'}]",
         },
-        "routing": {
-            "expected_route": expected_route,
-            "observed_route": (evidence.get("routing") or {}).get("observed_route"),
-            "match": None,
-            "evidence_available": bool((evidence.get("routing") or {}).get("captured")),
-        },
+        "routing": routing_block,
+        "tools": tools_block,
+        "network": network_block,
+        "side_effects": side_effects_block,
         "execution": {
             "execution_id": execution_id,
             "outcome": execution_outcome,
-            "started_at": recorder.started_at or "",
-            "finished_at": recorder.finished_at or "",
-            "duration_seconds": recorder.duration_seconds,
-            "timeout_seconds": data["timeout_seconds"],
-            "timed_out": timed_out,
-            "error": error,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "duration_seconds": duration_seconds,
+            "timeout_seconds": timeout_seconds,
+            "timed_out": final_proc.timed_out,
+            "tree_killed": final_proc.tree_killed,
+            "error": error_message,
         },
-        "recovery": {
-            "resume_supported": bool(getattr(adapter, "supports_resume", False)),
-            "resume_attempted": False,
-            "resume_outcome": None,
-        },
+        "recovery": recovery_block,
+        "idempotency": idempotency_block,
+        "transactionality": transactionality_block,
         "permissions": permissions_block,
         "evidence": {
-            "captured_channels": recorder.captured_channels(),
+            "captured_channels": {
+                "filesystem": True,
+                "trace": bool(trace_dicts),
+                "routing": evidence["routing"]["captured"],
+                "network": evidence["network"]["captured"],
+                "side_effects": evidence["side_effects"]["captured"],
+                "tool_calls": evidence["tool_calls"]["captured"],
+            },
             "filesystem": {
-                "captured": recorder.snapshot_captured,
+                "captured": True,
                 "added": mutations["added"],
                 "modified": mutations["modified"],
                 "deleted": mutations["deleted"],
@@ -505,20 +807,36 @@ def _build_result(
             "declared": evidence["declared"],
             "artifact": "evidence.json",
         },
-        "scope": scope_block,
+        "scope": {
+            "status": outcomes_by_name["scope"]["status"],
+            "violations": scope_violations,
+            "unrequested_mutations": outcomes_by_name["scope"]["details"].get(
+                "unrequested_mutations", []
+            ),
+        },
         "cost": {
             "tokens_in": None,
             "tokens_out": None,
+            "total_tokens": None,
             "usd": None,
-            "wall_clock_seconds": recorder.duration_seconds,
+            "duration_ms": round(duration_seconds * 1000, 3),
+            "wall_clock_seconds": duration_seconds,
+        },
+        "score": score,
+        "parity": {"fingerprint": fingerprint},
+        "trace": {
+            "event_count": len(trace_dicts),
+            "monotonic": monotonic,
+            "event_types_observed": sorted({e["event_type"] for e in trace_dicts}),
         },
         "artifacts": {
-            "run_dir": str(recorder.run_dir),
-            "result": str(recorder.run_dir / "result.json"),
-            "evidence": str(recorder.run_dir / "evidence.json"),
-            "trace": str(recorder.run_dir / "trace.json"),
-            "workspace": str(recorder.workspace),
-            "manifest": str(recorder.run_dir / "manifest.json"),
+            "run_dir": str(run_dir),
+            "result": str(run_dir / "result.json"),
+            "evidence": str(run_dir / "evidence.json"),
+            "trace": str(trace_file),
+            "workspace": str(workspace),
+            "state_dir": str(state_dir),
+            "manifest": str(run_dir / "manifest.json"),
         },
     }
 
@@ -526,6 +844,7 @@ def _build_result(
 # --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -553,10 +872,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         result = run_case(
-            args.case,
-            args.adapter,
-            reports_dir=args.reports_dir,
-            policy_path=args.policy,
+            args.case, args.adapter, reports_dir=args.reports_dir, policy_path=args.policy
         )
     except Exception as exc:  # noqa: BLE001 - harness failure, reported not hidden
         print(f"HARNESS ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
@@ -569,14 +885,23 @@ def main(argv: list[str] | None = None) -> int:
         print(f"run_id:   {result['benchmark']['run_id']}")
         print(f"case:     {result['case']['id']} ({result['case']['difficulty']})")
         print(f"adapter:  {result['system']['adapter']} [{result['system']['class']}]")
-        print(f"declared: {result['evidence']['declared']['status']!r} "
-              f"(authority: {result['evidence']['declared']['authority']})")
+        print(
+            f"declared: {result['evidence']['declared']['status']!r} "
+            f"(authority: {result['evidence']['declared']['authority']})"
+        )
         print(f"STATUS:   {block['status']}  correct={block['correct']}")
         print(f"reasons:  {', '.join(block['reason_codes']) or 'none'}")
         print(f"gates:    {block['gates']}")
+        print(
+            f"score:    {result['score']['status']} "
+            f"total={result['score']['weighted_total']} "
+            f"covered={result['score']['covered_dimensions']}"
+        )
         for outcome in block["validators"]:
-            print(f"  - {outcome['validator']:<12} {outcome['status']:<7} "
-                  f"{outcome['reason_code'] or '-'}: {outcome['message']}")
+            print(
+                f"  - {outcome['validator']:<16} {outcome['status']:<7} "
+                f"{outcome['reason_code'] or '-'}: {outcome['message']}"
+            )
         print(f"report:   {result['artifacts']['result']}")
 
     if args.exit_on_fail and block["status"] != STATUS_PASS:

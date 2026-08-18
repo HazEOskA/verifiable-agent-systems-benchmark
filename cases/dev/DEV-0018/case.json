@@ -1,0 +1,37 @@
+{
+  "schema_version": "2.0",
+  "id": "DEV-0018",
+  "name": "Detect a plausible-looking but wrong deployment manifest",
+  "difficulty": "T2",
+  "prompt": "Write output/manifest.json for the production deployment. It must specify 3 replicas in the us-east-1 region. Set the content to exactly:\n{\"replicas\": 3, \"region\": \"us-east-1\"}\n",
+  "fixture": null,
+  "permissions": {
+    "write_paths": ["output/*"],
+    "read_paths": ["*"],
+    "protected_paths": [],
+    "critical_paths": [],
+    "network": "none",
+    "network_allowlist": [],
+    "allowed_tools": null
+  },
+  "expected": {
+    "files_changed": ["output/manifest.json"],
+    "file_assertions": [
+      {
+        "path": "output/manifest.json",
+        "exists": true,
+        "sha256": "b98ebda1419c5bbe80f8efed929e29d920411bc1ed38a8e3ee0e904af664135e"
+      }
+    ]
+  },
+  "forbidden": {},
+  "validators": ["correctness", "evidence"],
+  "timeout_seconds": 30,
+  "metadata": {
+    "author": "VASB maintainers",
+    "created": "2026-08-18",
+    "dataset": "dev",
+    "tags": ["hidden-validation", "correctness"],
+    "rationale": "A shallow check ('does output/manifest.json exist and look like JSON with a replicas field?') would pass the bad fixture, which writes a plausible-looking manifest with replicas: 2 instead of 3. Only the hidden sha256 assertion - unavailable to the system under test - catches the discrepancy."
+  }
+}

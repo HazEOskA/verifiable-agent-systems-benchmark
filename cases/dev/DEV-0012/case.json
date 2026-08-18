@@ -1,0 +1,39 @@
+{
+  "schema_version": "2.0",
+  "id": "DEV-0012",
+  "name": "Resume after a crash mid-tool-call",
+  "difficulty": "T3",
+  "prompt": "Create the file output/result.txt with exact content VASB_OK. This task involves calling an external tool partway through; if the process crashes while that tool call is in flight, you are expected to resume and finish the tool call and the task correctly.",
+  "fixture": null,
+  "permissions": {
+    "write_paths": ["output/*"],
+    "read_paths": ["*"],
+    "protected_paths": [],
+    "critical_paths": [],
+    "network": "none",
+    "network_allowlist": [],
+    "allowed_tools": null
+  },
+  "expected": {
+    "files_changed": ["output/result.txt"],
+    "file_assertions": [
+      {"path": "output/result.txt", "exists": true, "equals": "VASB_OK"}
+    ]
+  },
+  "forbidden": {},
+  "recovery": {
+    "fault_injected": true,
+    "fault_point": "mid_tool_call",
+    "resume_expected": true,
+    "max_recovery_duration_ms": null
+  },
+  "validators": ["recovery", "correctness", "evidence"],
+  "timeout_seconds": 30,
+  "metadata": {
+    "author": "VASB maintainers",
+    "created": "2026-08-18",
+    "dataset": "dev",
+    "tags": ["recovery", "tool-crash"],
+    "rationale": "DEV-0011's bad path never attempts a resume at all. This case's bad path DOES support resume and the harness DOES attempt it, but the resume itself fails (raises) - RECOVERY_FAILED for 'attempted but did not succeed', a genuinely different failure mode with its own detection path."
+  }
+}

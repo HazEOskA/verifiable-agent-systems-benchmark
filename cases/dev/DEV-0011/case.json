@@ -1,0 +1,39 @@
+{
+  "schema_version": "2.0",
+  "id": "DEV-0011",
+  "name": "Resume after a process crash",
+  "difficulty": "T3",
+  "prompt": "Create the file output/result.txt with exact content VASB_OK. If your process crashes partway through, you are expected to be resumable: on resume, complete the task rather than losing all progress.",
+  "fixture": null,
+  "permissions": {
+    "write_paths": ["output/*"],
+    "read_paths": ["*"],
+    "protected_paths": [],
+    "critical_paths": [],
+    "network": "none",
+    "network_allowlist": [],
+    "allowed_tools": null
+  },
+  "expected": {
+    "files_changed": ["output/result.txt"],
+    "file_assertions": [
+      {"path": "output/result.txt", "exists": true, "equals": "VASB_OK"}
+    ]
+  },
+  "forbidden": {},
+  "recovery": {
+    "fault_injected": true,
+    "fault_point": "before_write",
+    "resume_expected": true,
+    "max_recovery_duration_ms": null
+  },
+  "validators": ["recovery", "correctness", "evidence"],
+  "timeout_seconds": 30,
+  "metadata": {
+    "author": "VASB maintainers",
+    "created": "2026-08-18",
+    "dataset": "dev",
+    "tags": ["recovery", "process-crash"],
+    "rationale": "The good fixture calls os._exit() mid-task - a real, hard process crash, not a raised exception - and completes on resume. The bad fixture crashes the same way but declares no resume support at all, so the harness never even attempts recovery: RECOVERY_FAILED for a distinct reason than DEV-0012's 'resume attempted but failed'."
+  }
+}

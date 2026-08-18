@@ -69,6 +69,15 @@ class LoadedCase:
         fixture = self.data.get("fixture")
         return None if fixture is None else self.case_dir / fixture
 
+    @property
+    def fixture_hash(self) -> str | None:
+        """Hash of the SAME STARTING STATE data alone (Article 3), distinct from
+        case_hash which covers the whole case definition (prompt/expected/etc)."""
+        fixture_dir = self.fixture_dir
+        if fixture_dir is None:
+            return None
+        return hash_tree(fixture_dir)
+
 
 def load_case(path: str | Path) -> LoadedCase:
     """Load ``case.json`` from a case directory (or a direct path to the file)."""

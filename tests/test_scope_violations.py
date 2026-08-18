@@ -7,13 +7,13 @@ run is not a pass.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable
 
 from adapters.base import AdapterRunOutcome, TraceEvent
 from adapters.fixtures.honest_dummy import HonestDummyAdapter
 from runner.execute import run_case
+from runner.trace import read_trace_jsonl
 
 
 class VandalAdapter(HonestDummyAdapter):
@@ -24,7 +24,9 @@ class VandalAdapter(HonestDummyAdapter):
     def run(self, prompt: str) -> AdapterRunOutcome:
         outcome = super().run(prompt)
         assert self._plan is not None
-        (self._plan.workspace / "NOTES.md").write_text("overwritten by the agent\n", encoding="utf-8")
+        (self._plan.workspace / "NOTES.md").write_text(
+            "overwritten by the agent\n", encoding="utf-8"
+        )
         return outcome
 
 
@@ -155,8 +157,9 @@ def test_scope_violation_is_recorded_in_the_evidence_bundle(
 
 def test_vandal_adapter_still_produces_a_trace(dev_case: Path, reports_dir: Path) -> None:
     result = run_case(dev_case, VANDAL, reports_dir=reports_dir)
-    trace: Sequence[dict] = json.loads(
-        Path(result["artifacts"]["trace"]).read_text(encoding="utf-8")
+    trace = read_trace_jsonl(Path(result["artifacts"]["trace"]))
+    assert any(event.event_type == "TOOL_CALL_STARTED" for event in trace)
+    sample = TraceEvent(
+        timestamp="t", sequence=1, event_type="CHECKPOINT", source="adapter", payload={}
     )
-    assert any(event["type"] == "tool_call" for event in trace)
-    assert isinstance(TraceEvent(ts="t", type="log", name="n").to_dict(), dict)
+    assert isinstance(sample.to_dict(), dict)

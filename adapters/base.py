@@ -10,6 +10,12 @@ Two structural guarantees are implemented here, not merely documented:
 2. ``AdapterRunOutcome`` names every self-reported field ``declared_*`` and
    carries ``AUTHORITY = "none"``. Verdict aggregation never reads these fields;
    they are recorded as evidence *about the agent's claims*, not as findings.
+
+An adapter's full lifecycle runs inside a separate OS process (``runner.worker``),
+not the harness process - see runner/process.py. ``CasePlan.trace`` is that
+process's connection to the shared structured trace (runner.trace.TraceRecorder);
+``CasePlan.state_dir`` is a directory that survives a crash-and-resume cycle,
+for adapters that need to persist recovery checkpoints.
 """
 
 from __future__ import annotations
@@ -19,6 +25,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from runner.trace import TraceEvent, TraceRecorder
+
 SYSTEM_CLASSES = (
     "execution_governance_runtime",
     "agent_framework",
@@ -26,6 +34,17 @@ SYSTEM_CLASSES = (
     "reasoning_action_baseline",
     "reference_fixture",
 )
+
+__all__ = [
+    "AdapterError",
+    "AdapterRunOutcome",
+    "AgentAdapter",
+    "CasePlan",
+    "REQUIRED_ADAPTER_METHODS",
+    "ResumeNotSupported",
+    "SYSTEM_CLASSES",
+    "TraceEvent",
+]
 
 
 class AdapterError(RuntimeError):
@@ -50,20 +69,11 @@ class CasePlan:
     workspace: Path
     permissions: Mapping[str, Any]
     timeout_seconds: int
+    trace: TraceRecorder
+    state_dir: Path
+    execution_id: str
+    resume_of: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class TraceEvent:
-    """One recorded step of adapter activity."""
-
-    ts: str
-    type: str  # tool_call | claim | log | state | route
-    name: str
-    payload: Mapping[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {"ts": self.ts, "type": self.type, "name": self.name, "payload": dict(self.payload)}
 
 
 @dataclass
@@ -120,6 +130,9 @@ class AgentAdapter(abc.ABC):
     model_provider: str | None = None
     model_name: str | None = None
     model_version: str | None = None
+    model_temperature: float | None = None
+    #: Declared token budget for this system, or None if genuinely unknown/unbounded.
+    token_budget: int | None = None
 
     @abc.abstractmethod
     def prepare(self, case: CasePlan) -> None:
@@ -135,7 +148,7 @@ class AgentAdapter(abc.ABC):
 
     @abc.abstractmethod
     def collect_trace(self) -> Sequence[TraceEvent]:
-        """Return the raw trace of this execution."""
+        """Return the structured trace of this execution."""
 
     @abc.abstractmethod
     def shutdown(self) -> None:

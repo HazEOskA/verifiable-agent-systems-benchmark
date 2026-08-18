@@ -3,11 +3,20 @@
 An adapter that returns ``status="PASS", message="all checks passed"`` while
 creating no artifact must still receive a benchmark verdict of FAIL
 (Constitution Article 5).
+
+The adapter's whole lifecycle now runs in a separate OS process
+(``runner.worker``), so ``monkeypatch.setattr`` on a class method - which
+only patches the parent test process's copy - cannot steer its behavior; the
+child re-imports the module fresh. These tests instead drive FakePassAdapter's
+behavior through an environment variable, which genuinely crosses the process
+boundary (``runner.execute`` passes the parent's environment through to the
+child), and clean it up with ``monkeypatch.setenv``/``delenv`` like any other
+env-based test.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import os
 from pathlib import Path
 from typing import Sequence
 
@@ -16,9 +25,20 @@ import pytest
 from adapters.base import AdapterRunOutcome, AgentAdapter, CasePlan, TraceEvent
 from runner.execute import run_case
 
+ENV_KEY = "VASB_TEST_FAKE_PASS_BEHAVIOR"
+
 
 class FakePassAdapter(AgentAdapter):
-    """Does nothing and reports the most authoritative-looking success it can."""
+    """Does nothing and reports the most authoritative-looking success it can.
+
+    Behavior is switchable via the VASB_TEST_FAKE_PASS_BEHAVIOR env var so
+    tests can steer it across the process boundary:
+
+        (unset)        -> declares "PASS" / "all checks passed"
+        "<STATUS>"     -> declares that literal string as declared_status
+        "SILENT"       -> declares nothing at all
+        "CRASH"        -> raises during run()
+    """
 
     name = "fake_pass"
     version = "0.0.0"
@@ -27,14 +47,22 @@ class FakePassAdapter(AgentAdapter):
     model_kind = "no_model"
 
     def __init__(self) -> None:
-        self._trace: list[TraceEvent] = []
+        self._plan: CasePlan | None = None
 
     def prepare(self, case: CasePlan) -> None:
-        self._trace.append(
-            TraceEvent(ts=datetime.now(timezone.utc).isoformat(), type="log", name="prepare")
-        )
+        self._plan = case
+        case.trace.emit("CHECKPOINT", source="adapter", payload={"phase": "prepare"})
 
     def run(self, prompt: str) -> AdapterRunOutcome:
+        behavior = os.environ.get(ENV_KEY)
+
+        if behavior == "CRASH":
+            raise RuntimeError("integration exploded")
+        if behavior == "SILENT":
+            return AdapterRunOutcome(execution_id="x", declared_status=None, declared_message=None)
+        if behavior:
+            return AdapterRunOutcome(execution_id="x", declared_status=behavior)
+
         return AdapterRunOutcome(
             execution_id="fake-exec-1",
             declared_status="PASS",
@@ -44,7 +72,7 @@ class FakePassAdapter(AgentAdapter):
         )
 
     def collect_trace(self) -> Sequence[TraceEvent]:
-        return list(self._trace)
+        return list(self._plan.trace.events) if self._plan is not None else []
 
     def shutdown(self) -> None:
         return None
@@ -84,10 +112,7 @@ def test_verdict_matches_the_silent_liar(dev_case: Path, reports_dir: Path) -> N
 def test_no_declared_status_string_can_buy_a_pass(
     dev_case: Path, reports_dir: Path, declared_status: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def run(self, prompt: str) -> AdapterRunOutcome:
-        return AdapterRunOutcome(execution_id="x", declared_status=declared_status)
-
-    monkeypatch.setattr(FakePassAdapter, "run", run)
+    monkeypatch.setenv(ENV_KEY, declared_status)
     result = run_case(dev_case, ADAPTER_SPEC, reports_dir=reports_dir)
     assert result["result"]["status"] == "FAIL"
 
@@ -96,11 +121,7 @@ def test_adapter_silence_does_not_buy_a_pass_either(
     dev_case: Path, reports_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Saying nothing avoids FALSE_SUCCESS but the task is still not done."""
-
-    def run(self, prompt: str) -> AdapterRunOutcome:
-        return AdapterRunOutcome(execution_id="x", declared_status=None, declared_message=None)
-
-    monkeypatch.setattr(FakePassAdapter, "run", run)
+    monkeypatch.setenv(ENV_KEY, "SILENT")
     result = run_case(dev_case, ADAPTER_SPEC, reports_dir=reports_dir)
 
     outcomes = {v["validator"]: v for v in result["result"]["validators"]}
@@ -133,10 +154,7 @@ def test_aggregation_never_reads_adapter_self_reports(repo_root: Path) -> None:
 def test_crashing_adapter_is_error_not_pass(
     dev_case: Path, reports_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def run(self, prompt: str) -> AdapterRunOutcome:
-        raise RuntimeError("integration exploded")
-
-    monkeypatch.setattr(FakePassAdapter, "run", run)
+    monkeypatch.setenv(ENV_KEY, "CRASH")
     result = run_case(dev_case, ADAPTER_SPEC, reports_dir=reports_dir)
 
     assert result["result"]["status"] == "ERROR"

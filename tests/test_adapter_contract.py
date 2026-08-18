@@ -1,4 +1,9 @@
-"""The adapter contract, including what an adapter is structurally denied."""
+"""The adapter contract, including what an adapter is structurally denied.
+
+These tests exercise adapters directly via CasePlan (built with the
+``make_case_plan`` fixture), not through the subprocess harness - they are
+unit tests of the adapter API itself, not of process isolation.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +11,7 @@ import dataclasses
 import inspect
 import json
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
@@ -21,7 +27,6 @@ from adapters import (
 from adapters.base import REQUIRED_ADAPTER_METHODS
 from adapters.fixtures.honest_dummy import HonestDummyAdapter, parse_file_directives
 from adapters.fixtures.lying_dummy import LyingDummyAdapter
-from runner.execute import build_case_plan
 from runner.loader import load_case
 
 
@@ -58,12 +63,13 @@ def test_adapter_implements_the_minimum_contract(cls: type[AgentAdapter]) -> Non
 
 
 @pytest.mark.parametrize("cls", [HonestDummyAdapter, LyingDummyAdapter])
-def test_adapter_lifecycle_runs_end_to_end(cls: type[AgentAdapter], tmp_path: Path,
-                                           dev_case: Path) -> None:
+def test_adapter_lifecycle_runs_end_to_end(
+    cls: type[AgentAdapter], tmp_path: Path, dev_case: Path, make_case_plan: Callable[..., CasePlan]
+) -> None:
     case = load_case(dev_case)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    plan = build_case_plan(case, workspace)
+    plan = make_case_plan(case, workspace)
 
     adapter = cls()
     adapter.prepare(plan)
@@ -84,11 +90,19 @@ def test_case_plan_cannot_carry_the_answer_key() -> None:
         assert leaked not in field_names
 
 
-def test_built_case_plan_contains_no_answer_key_values(dev_case: Path, tmp_path: Path) -> None:
+def test_built_case_plan_contains_no_answer_key_values(
+    dev_case: Path, tmp_path: Path, make_case_plan: Callable[..., CasePlan]
+) -> None:
     """Permissions are legitimately shared; expectations and validator names are not."""
     case = load_case(dev_case)
-    plan = build_case_plan(case, tmp_path)
-    exposed = json.dumps(dataclasses.asdict(plan), default=str)
+    plan = make_case_plan(case, tmp_path)
+    # dataclasses.asdict() would deepcopy every field, including `trace`
+    # (a TraceRecorder holding a threading.Lock, which cannot be deepcopied) -
+    # so the exposed-surface dict is built by hand instead, one field at a time.
+    plan_fields = {f.name for f in dataclasses.fields(plan)}
+    exposed = json.dumps(
+        {name: getattr(plan, name) for name in plan_fields if name != "trace"}, default=str
+    )
     for leaked in ("file_assertions", "expected_state", "files_changed", "expected_side_effects"):
         assert leaked not in exposed
     for validator_name in case.data["validators"]:
@@ -102,21 +116,25 @@ def test_adapter_outcome_declares_no_authority() -> None:
     assert outcome.to_dict()["authority"] == "none"
 
 
-def test_resume_default_is_explicitly_unsupported(dev_case: Path, tmp_path: Path) -> None:
+def test_resume_default_is_explicitly_unsupported(
+    dev_case: Path, tmp_path: Path, make_case_plan: Callable[..., CasePlan]
+) -> None:
     case = load_case(dev_case)
     adapter = LyingDummyAdapter()
-    adapter.prepare(build_case_plan(case, tmp_path))
+    adapter.prepare(make_case_plan(case, tmp_path))
     assert adapter.supports_resume is False
     with pytest.raises(ResumeNotSupported):
         adapter.resume("lying-exec-1")
 
 
-def test_resume_is_available_when_declared(dev_case: Path, tmp_path: Path) -> None:
+def test_resume_is_available_when_declared(
+    dev_case: Path, tmp_path: Path, make_case_plan: Callable[..., CasePlan]
+) -> None:
     case = load_case(dev_case)
     workspace = tmp_path / "ws"
     workspace.mkdir()
     adapter = HonestDummyAdapter()
-    adapter.prepare(build_case_plan(case, workspace))
+    adapter.prepare(make_case_plan(case, workspace))
     first = adapter.run(case.data["prompt"])
     resumed = adapter.resume(first.execution_id)
     assert adapter.supports_resume is True
@@ -130,12 +148,14 @@ def test_prompt_directive_parser_extracts_exact_content(dev_case: Path) -> None:
     assert directives == [("output/result.txt", "VASB_OK")]
 
 
-def test_lying_dummy_performs_no_filesystem_work(dev_case: Path, tmp_path: Path) -> None:
+def test_lying_dummy_performs_no_filesystem_work(
+    dev_case: Path, tmp_path: Path, make_case_plan: Callable[..., CasePlan]
+) -> None:
     case = load_case(dev_case)
     workspace = tmp_path / "ws"
     workspace.mkdir()
     adapter = LyingDummyAdapter()
-    adapter.prepare(build_case_plan(case, workspace))
+    adapter.prepare(make_case_plan(case, workspace))
     outcome = adapter.run(case.data["prompt"])
     assert list(workspace.rglob("*")) == []
     assert outcome.declared_status == "DONE"

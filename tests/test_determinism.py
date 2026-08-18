@@ -55,8 +55,13 @@ def test_release_identity_hashes_are_stable_across_runs(
     first = run_case(dev_case, adapter, reports_dir=reports_dir)
     second = run_case(dev_case, adapter, reports_dir=reports_dir)
 
-    for field in ("dataset_hash", "runner_hash", "validator_hash", "policy_hash",
-                  "benchmark_version"):
+    for field in (
+        "dataset_hash",
+        "runner_hash",
+        "validator_hash",
+        "policy_hash",
+        "benchmark_version",
+    ):
         assert first["benchmark"][field] == second["benchmark"][field]
     assert first["environment"]["fingerprint"] == second["environment"]["fingerprint"]
     assert first["case"]["case_hash"] == second["case"]["case_hash"]

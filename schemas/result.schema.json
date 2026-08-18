@@ -13,12 +13,20 @@
     "environment",
     "result",
     "routing",
+    "tools",
+    "network",
+    "side_effects",
     "execution",
     "recovery",
+    "idempotency",
+    "transactionality",
     "permissions",
     "evidence",
     "scope",
     "cost",
+    "score",
+    "parity",
+    "trace",
     "artifacts"
   ],
   "properties": {
@@ -36,7 +44,7 @@
         "run_id"
       ],
       "properties": {
-        "schema_version": {"type": "string", "const": "1.0"},
+        "schema_version": {"type": "string", "const": "2.0"},
         "benchmark_version": {"type": "string"},
         "benchmark_commit": {"type": ["string", "null"]},
         "dataset_hash": {"type": "string"},
@@ -49,13 +57,14 @@
     "case": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "name", "difficulty", "path", "case_hash", "dataset"],
+      "required": ["id", "name", "difficulty", "path", "case_hash", "fixture_hash", "dataset"],
       "properties": {
         "id": {"type": "string"},
         "name": {"type": "string"},
         "difficulty": {"type": "string", "enum": ["T1", "T2", "T3"]},
         "path": {"type": "string"},
         "case_hash": {"type": "string"},
+        "fixture_hash": {"type": ["string", "null"]},
         "dataset": {"type": "string"}
       }
     },
@@ -81,18 +90,22 @@
     "model": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "provider", "name", "version"],
+      "required": ["kind", "provider", "name", "version", "temperature", "token_budget"],
       "properties": {
         "kind": {"type": "string", "enum": ["no_model", "llm", "unknown"]},
         "provider": {"type": ["string", "null"]},
         "name": {"type": ["string", "null"]},
-        "version": {"type": ["string", "null"]}
+        "version": {"type": ["string", "null"]},
+        "temperature": {"type": ["number", "null"]},
+        "token_budget": {"type": ["integer", "null"]}
       }
     },
     "environment": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["fingerprint", "python", "platform", "cpu_count", "ram_bytes", "network_policy", "token_budget", "timeout_seconds"],
+      "required": ["fingerprint", "python", "platform", "cpu_count", "ram_bytes",
+                   "network_policy", "token_budget", "timeout_seconds",
+                   "cpu_limit", "memory_limit", "platform_notes"],
       "properties": {
         "fingerprint": {"type": "string"},
         "python": {"type": "string"},
@@ -101,7 +114,10 @@
         "ram_bytes": {"type": ["integer", "null"]},
         "network_policy": {"type": "string"},
         "token_budget": {"type": ["integer", "null"]},
-        "timeout_seconds": {"type": "integer"}
+        "timeout_seconds": {"type": "integer"},
+        "cpu_limit": {"type": ["number", "null"]},
+        "memory_limit": {"type": ["integer", "null"]},
+        "platform_notes": {"type": "array", "items": {"type": "string"}}
       }
     },
     "result": {
@@ -148,51 +164,137 @@
     "routing": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["expected_route", "observed_route", "match", "evidence_available"],
+      "required": ["expected_route", "observed_route", "forbidden_routes", "evidence_available",
+                   "routing_correct", "wrong_route", "unnecessary_route", "forbidden_route_used"],
       "properties": {
         "expected_route": {"type": ["string", "null"]},
         "observed_route": {"type": ["string", "null"]},
-        "match": {"type": ["boolean", "null"]},
-        "evidence_available": {"type": "boolean"}
+        "forbidden_routes": {"type": "array", "items": {"type": "string"}},
+        "evidence_available": {"type": "boolean"},
+        "routing_correct": {"type": ["boolean", "null"]},
+        "wrong_route": {"type": ["boolean", "null"]},
+        "unnecessary_route": {"type": ["boolean", "null"]},
+        "forbidden_route_used": {"type": ["boolean", "null"]}
+      }
+    },
+    "tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence_available", "total_tool_calls", "necessary_tool_calls",
+                   "failed_tool_calls", "redundant_tool_calls", "forbidden_tool_calls",
+                   "tool_efficiency"],
+      "properties": {
+        "evidence_available": {"type": "boolean"},
+        "total_tool_calls": {"type": ["integer", "null"]},
+        "necessary_tool_calls": {"type": ["integer", "null"]},
+        "failed_tool_calls": {"type": ["integer", "null"]},
+        "redundant_tool_calls": {"type": ["integer", "null"]},
+        "forbidden_tool_calls": {"type": ["integer", "null"]},
+        "tool_efficiency": {"type": ["number", "null"]}
+      }
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["captured", "attempts", "violations", "status"],
+      "properties": {
+        "captured": {"type": "boolean"},
+        "attempts": {"type": "array", "items": {"type": "object"}},
+        "violations": {"type": "array", "items": {"type": "object"}},
+        "status": {"type": "string", "enum": ["PASS", "FAIL", "UNKNOWN", "ERROR"]}
+      }
+    },
+    "side_effects": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["captured", "effects", "missing_expected", "forbidden_present", "status"],
+      "properties": {
+        "captured": {"type": "boolean"},
+        "effects": {"type": "array", "items": {"type": "object"}},
+        "missing_expected": {"type": "array", "items": {"type": "object"}},
+        "forbidden_present": {"type": "array", "items": {"type": "object"}},
+        "status": {"type": "string", "enum": ["PASS", "FAIL", "UNKNOWN", "ERROR"]}
       }
     },
     "execution": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["execution_id", "outcome", "started_at", "finished_at", "duration_seconds", "timeout_seconds", "timed_out", "error"],
+      "required": ["execution_id", "outcome", "started_at", "finished_at", "duration_seconds",
+                   "timeout_seconds", "timed_out", "tree_killed", "error"],
       "properties": {
         "execution_id": {"type": ["string", "null"]},
         "outcome": {
           "type": "string",
-          "enum": ["COMPLETED", "TIMEOUT", "ADAPTER_ERROR", "HARNESS_ERROR", "BLOCKED"]
+          "enum": ["COMPLETED", "TIMEOUT", "ADAPTER_ERROR", "PROCESS_CRASH", "HARNESS_ERROR", "BLOCKED"]
         },
         "started_at": {"type": "string"},
         "finished_at": {"type": "string"},
         "duration_seconds": {"type": "number"},
         "timeout_seconds": {"type": "integer"},
         "timed_out": {"type": "boolean"},
+        "tree_killed": {"type": ["boolean", "null"]},
         "error": {"type": ["string", "null"]}
       }
     },
     "recovery": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["resume_supported", "resume_attempted", "resume_outcome"],
+      "required": ["resume_supported", "fault_injected", "fault_point", "resume_attempted",
+                   "resume_success", "repeated_completed_steps", "duplicate_side_effects",
+                   "lost_state", "recovery_duration_ms", "status"],
       "properties": {
         "resume_supported": {"type": "boolean"},
+        "fault_injected": {"type": ["boolean", "null"]},
+        "fault_point": {"type": ["string", "null"]},
         "resume_attempted": {"type": "boolean"},
-        "resume_outcome": {"type": ["string", "null"]}
+        "resume_success": {"type": ["boolean", "null"]},
+        "repeated_completed_steps": {"type": ["integer", "null"]},
+        "duplicate_side_effects": {"type": ["integer", "null"]},
+        "lost_state": {"type": ["boolean", "null"]},
+        "recovery_duration_ms": {"type": ["number", "null"]},
+        "status": {"type": "string", "enum": ["PASS", "FAIL", "UNKNOWN", "ERROR"]}
+      }
+    },
+    "idempotency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evaluated", "max_duplicate_side_effects", "duplicate_count", "duplicates", "status"],
+      "properties": {
+        "evaluated": {"type": "boolean"},
+        "max_duplicate_side_effects": {"type": ["integer", "null"]},
+        "duplicate_count": {"type": ["integer", "null"]},
+        "duplicates": {"type": "array", "items": {"type": "object"}},
+        "status": {"type": "string", "enum": ["PASS", "FAIL", "UNKNOWN", "ERROR"]}
+      }
+    },
+    "transactionality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required_on_failure", "applicable", "rollback_ok", "diff", "status"],
+      "properties": {
+        "required_on_failure": {"type": "boolean"},
+        "applicable": {"type": "boolean"},
+        "rollback_ok": {"type": ["boolean", "null"]},
+        "diff": {"type": "array", "items": {"type": "object"}},
+        "status": {"type": "string", "enum": ["PASS", "FAIL", "UNKNOWN", "ERROR"]}
       }
     },
     "permissions": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["status", "critical_violations", "violations", "durability_violations"],
+      "required": ["status", "critical_violations", "violations", "durability_violations",
+                   "permission_outcome", "prevented_count", "detected_violation_count"],
       "properties": {
         "status": {"type": "string", "enum": ["PASS", "FAIL", "UNKNOWN", "ERROR"]},
         "critical_violations": {"type": "integer", "minimum": 0},
         "violations": {"type": "array", "items": {"type": "object"}},
-        "durability_violations": {"type": "array", "items": {"type": "object"}}
+        "durability_violations": {"type": "array", "items": {"type": "object"}},
+        "permission_outcome": {
+          "type": "string",
+          "enum": ["PREVENTED", "DETECTED_VIOLATION", "NO_VIOLATION", "UNKNOWN", "MIXED"]
+        },
+        "prevented_count": {"type": "integer", "minimum": 0},
+        "detected_violation_count": {"type": "integer", "minimum": 0}
       }
     },
     "evidence": {
@@ -242,24 +344,58 @@
     "cost": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["tokens_in", "tokens_out", "usd", "wall_clock_seconds"],
+      "required": ["tokens_in", "tokens_out", "total_tokens", "usd", "duration_ms", "wall_clock_seconds"],
       "properties": {
         "tokens_in": {"type": ["integer", "null"]},
         "tokens_out": {"type": ["integer", "null"]},
+        "total_tokens": {"type": ["integer", "null"]},
         "usd": {"type": ["number", "null"]},
+        "duration_ms": {"type": ["number", "null"]},
         "wall_clock_seconds": {"type": "number"}
+      }
+    },
+    "score": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "weighted_total", "dimensions", "weights", "weights_hash", "covered_dimensions"],
+      "properties": {
+        "status": {"type": "string", "enum": ["COMPUTED", "UNKNOWN"]},
+        "weighted_total": {"type": ["number", "null"]},
+        "dimensions": {"type": "object"},
+        "weights": {"type": "object"},
+        "weights_hash": {"type": "string"},
+        "covered_dimensions": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "parity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fingerprint"],
+      "properties": {
+        "fingerprint": {"type": "object"}
+      }
+    },
+    "trace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event_count", "monotonic", "event_types_observed"],
+      "properties": {
+        "event_count": {"type": "integer", "minimum": 0},
+        "monotonic": {"type": "boolean"},
+        "event_types_observed": {"type": "array", "items": {"type": "string"}}
       }
     },
     "artifacts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["run_dir", "result", "evidence", "trace", "workspace", "manifest"],
+      "required": ["run_dir", "result", "evidence", "trace", "workspace", "state_dir", "manifest"],
       "properties": {
         "run_dir": {"type": "string"},
         "result": {"type": "string"},
         "evidence": {"type": "string"},
         "trace": {"type": "string"},
         "workspace": {"type": "string"},
+        "state_dir": {"type": "string"},
         "manifest": {"type": "string"}
       }
     }

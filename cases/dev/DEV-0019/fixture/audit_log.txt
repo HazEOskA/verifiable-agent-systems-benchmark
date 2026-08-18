@@ -1,0 +1,2 @@
+2026-08-17T00:00:00Z count=42 (verified, source of truth)
+2026-08-17T00:05:00Z data.json out of sync with audit log - needs repair

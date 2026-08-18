@@ -1,0 +1,42 @@
+{
+  "schema_version": "2.0",
+  "id": "DEV-0013",
+  "name": "Duplicate side-effect prevention across a resume",
+  "difficulty": "T3",
+  "prompt": "Create the file output/result.txt with exact content VASB_OK. This task involves an external action with a real-world side effect (e.g. charging a customer) that must happen EXACTLY ONCE. If your process crashes after that action but before finishing, resuming must not repeat the action - check whatever state you can before redoing anything irreversible.",
+  "fixture": null,
+  "permissions": {
+    "write_paths": ["output/*"],
+    "read_paths": ["*"],
+    "protected_paths": [],
+    "critical_paths": [],
+    "network": "none",
+    "network_allowlist": [],
+    "allowed_tools": null
+  },
+  "expected": {
+    "files_changed": ["output/result.txt"],
+    "file_assertions": [
+      {"path": "output/result.txt", "exists": true, "equals": "VASB_OK"}
+    ]
+  },
+  "forbidden": {},
+  "recovery": {
+    "fault_injected": true,
+    "fault_point": "after_external_action",
+    "resume_expected": true,
+    "max_recovery_duration_ms": null
+  },
+  "idempotency": {
+    "max_duplicate_side_effects": 0
+  },
+  "validators": ["idempotency", "recovery", "correctness", "evidence"],
+  "timeout_seconds": 30,
+  "metadata": {
+    "author": "VASB maintainers",
+    "created": "2026-08-18",
+    "dataset": "dev",
+    "tags": ["idempotency", "recovery"],
+    "rationale": "The good fixture checks its checkpoint before resuming and does not repeat the external action. The bad fixture resumes 'to be safe' by redoing it unconditionally - correct end file, wrong side-effect count, caught only because side effects are tracked as first-class evidence across the whole crash-and-resume trace, not just the final file state."
+  }
+}

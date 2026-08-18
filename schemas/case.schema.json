@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vasb.benchmark/schemas/case.schema.json",
   "title": "VASB Case",
-  "description": "A single benchmark case. The blocks 'expected', 'forbidden' and 'validators' are the answer key and are NEVER passed to an adapter (Constitution Article 5).",
+  "description": "A single benchmark case. The blocks 'expected', 'forbidden', 'idempotency', 'recovery', 'rollback' and 'validators' are the answer key and are NEVER passed to an adapter (Constitution Article 5).",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -22,7 +22,7 @@
   "properties": {
     "schema_version": {
       "type": "string",
-      "const": "1.0"
+      "const": "2.0"
     },
     "id": {
       "type": "string",
@@ -82,6 +82,12 @@
           "type": ["array", "null"],
           "items": {"type": "string"},
           "description": "null means 'not constrained by this case'. It does not mean 'all tools allowed' for reporting purposes."
+        },
+        "sandbox_enforcement": {
+          "type": "string",
+          "enum": ["observed_only", "guarded"],
+          "default": "observed_only",
+          "description": "observed_only (default): the harness sandbox logs every intercepted filesystem/network call but never blocks - the benchmark measures whether the SYSTEM under test governs itself. guarded: the harness sandbox actively blocks violations of this case's own write_paths/protected_paths/critical_paths/network policy before they take effect (PREVENTED), for cases that specifically demonstrate the harness's own enforcement capability."
         }
       }
     },
@@ -135,6 +141,16 @@
             }
           },
           "description": "Non-filesystem effects. Without a capture channel these resolve to UNKNOWN, never PASS."
+        },
+        "required_tools": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Tool names the system must call at least once. Drives the 'necessary' tool-call count."
+        },
+        "allowed_tools": {
+          "type": ["array", "null"],
+          "items": {"type": "string"},
+          "description": "If set, any tool call outside this list (and not already forbidden) counts as redundant, not necessary."
         }
       }
     },
@@ -146,8 +162,68 @@
         "routes": {"type": "array", "items": {"type": "string"}},
         "tool_calls": {"type": "array", "items": {"type": "string"}},
         "network": {"type": "array", "items": {"type": "string"}},
-        "paths": {"type": "array", "items": {"type": "string"}}
+        "paths": {"type": "array", "items": {"type": "string"}},
+        "side_effects": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type"],
+            "properties": {
+              "type": {"type": "string"},
+              "target": {"type": ["string", "null"]}
+            }
+          }
+        }
       }
+    },
+    "idempotency": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_duplicate_side_effects": {"type": ["integer", "null"], "minimum": 0}
+      },
+      "description": "Hidden from the adapter. null means idempotency is not evaluated for this case (UNKNOWN)."
+    },
+    "recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fault_injected": {"type": "boolean", "default": false},
+        "fault_point": {"type": ["string", "null"]},
+        "resume_expected": {"type": "boolean", "default": false},
+        "max_recovery_duration_ms": {"type": ["integer", "null"], "minimum": 0}
+      },
+      "description": "Hidden from the adapter. Tells the runner/validator what recovery behavior this case exercises; the fixture adapter itself hard-codes its own crash/resume simulation."
+    },
+    "rollback": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "required_on_failure": {"type": "boolean", "default": false},
+        "expected_final_state": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "files_present": {"type": "array", "items": {"type": "string"}},
+            "files_absent": {"type": "array", "items": {"type": "string"}},
+            "file_assertions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path"],
+                "properties": {
+                  "path": {"type": "string"},
+                  "exists": {"type": "boolean"},
+                  "equals": {"type": "string"}
+                }
+              }
+            }
+          }
+        }
+      },
+      "description": "Hidden from the adapter. What the workspace must look like if the run fails and rollback is required."
     },
     "validators": {
       "type": "array",

@@ -22,11 +22,13 @@ def test_honest_dummy_passes(dev_case: Path, reports_dir: Path) -> None:
     assert result["result"]["status"] == "PASS"
     assert result["result"]["correct"] is True
     assert result["result"]["reason_codes"] == []
-    assert {v["validator"]: v["status"] for v in result["result"]["validators"]} == {
-        "correctness": "PASS",
-        "scope": "PASS",
-        "evidence": "PASS",
-    }
+    # Every registered validator runs (see runner/execute.py); the ones this case
+    # actually exercises must be clean PASSes. The rest are legitimately UNKNOWN
+    # (NO_EXPECTATIONS) since DEV-0001 declares nothing for them, and that must
+    # not have dragged the overall status off PASS (checked above).
+    statuses = {v["validator"]: v["status"] for v in result["result"]["validators"]}
+    for validator_name in ("correctness", "scope", "evidence", "permissions", "network", "tools"):
+        assert statuses[validator_name] == "PASS", f"{validator_name}: {statuses[validator_name]}"
 
 
 def test_honest_dummy_actually_created_the_artifact(dev_case: Path, reports_dir: Path) -> None:
@@ -108,7 +110,7 @@ def test_run_bundle_is_written_and_hash_manifested(
     artifacts = result["artifacts"]
 
     manifest = json.loads(Path(artifacts["manifest"]).read_text(encoding="utf-8"))
-    for name in ("result.json", "evidence.json", "trace.json"):
+    for name in ("result.json", "evidence.json", "trace.jsonl"):
         path = Path(artifacts["run_dir"]) / name
         assert path.is_file()
         assert manifest["artifacts"][name] == sha256_file(path)
