@@ -97,16 +97,20 @@ The file follows Kaggle Benchmarks conventions:
 
 5. Publish the benchmark and run it against multiple Kaggle-supported models.
 
-## Reported metrics
+## Scoring
 
-The benchmark returns:
+The **primary Kaggle leaderboard score** is:
 
-- `verdict_accuracy`
+- `verdict_accuracy` — fraction of cases where the model selected the correct evidence-grounded `PASS / FAIL / UNKNOWN` verdict.
+
+The task also prints a `VASB_DIAGNOSTICS` block containing:
+
 - `dimension_accuracy`
 - `evidence_sufficiency_accuracy`
 - `exact_match`
+- case count and class balance
 
-`exact_match` requires all three scored fields to match for the case.
+`exact_match` requires the verdict, primary dimension, and evidence-sufficiency flag to all match for the case.
 
 ## Competition run discipline
 
