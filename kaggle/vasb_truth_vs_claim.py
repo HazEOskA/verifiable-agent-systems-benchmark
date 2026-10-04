@@ -313,7 +313,7 @@ Return the evidence-grounded verdict.
     name="vasb_truth_vs_claim",
     description="Tests whether a model trusts observable execution evidence over an agent's own success claim.",
 )
-def vasb_truth_vs_claim(llm, df) -> dict:
+def vasb_truth_vs_claim(llm, df) -> float:
     os.environ["RENDER_SUBRUNS"] = "False"
 
     with kbench.client.enable_cache():
@@ -340,14 +340,21 @@ def vasb_truth_vs_claim(llm, df) -> dict:
         expectation="Exact-match score must be normalized to the 0..1 interval.",
     )
 
-    return {
+    diagnostics = {
         "cases": int(df.shape[0]),
-        "class_balance": {"PASS": 4, "FAIL": 4, "UNKNOWN": 4},
+        "class_balance": {
+            str(k): int(v) for k, v in df["expected_verdict"].value_counts().to_dict().items()
+        },
         "verdict_accuracy": verdict_accuracy,
         "dimension_accuracy": dimension_accuracy,
         "evidence_sufficiency_accuracy": evidence_accuracy,
         "exact_match": exact_match,
     }
+    print("VASB_DIAGNOSTICS", diagnostics)
+
+    # Primary Kaggle leaderboard score: can the model reach the correct
+    # evidence-grounded PASS / FAIL / UNKNOWN verdict?
+    return verdict_accuracy
 
 
 # %%
