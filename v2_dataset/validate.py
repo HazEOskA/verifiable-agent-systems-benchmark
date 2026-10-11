@@ -52,22 +52,29 @@ def collect(source: Path, schema_path: Path) -> tuple[list[dict], dict]:
                 errs = list(validator.iter_errors(case))
                 for err in errs[:5]:
                     issues.append(f"{cid}: schema error at {list(err.path)}: {err.message}")
-                if cid in ids:
+                if not isinstance(cid, str) or not cid.startswith("PUB-"):
+                    issues.append(f"{cid}: non-public id")
+                elif cid in ids:
                     issues.append(f"duplicate case id: {cid}")
-                ids.add(cid)
+                else:
+                    ids.add(cid)
                 prompt = case.get("prompt")
-                if prompt in prompts:
+                if not isinstance(prompt, str):
+                    issues.append(f"{cid}: invalid prompt type")
+                elif prompt in prompts:
                     issues.append(f"duplicate full prompt: {cid}")
-                prompts.add(prompt)
-                dims = case.get("validators", [])
-                if dims != [source_file.stem] or dims[0] not in FAMILIES:
+                else:
+                    prompts.add(prompt)
+                dims = case.get("validators")
+                if not isinstance(dims, list) or dims != [source_file.stem]:
                     issues.append(f"{cid}: mismatched validator/domain")
                 else:
                     counts[dims[0]] += 1
-                if not isinstance(cid, str) or not cid.startswith("PUB-"):
-                    issues.append(f"{cid}: non-public id")
-                meta = case.get("metadata") or {}
-                if meta.get("dataset") != "public" or not {"synthetic", "candidate", "unreviewed"}.issubset(set(meta.get("tags", []))):
+                meta = case.get("metadata")
+                tags = meta.get("tags") if isinstance(meta, dict) else None
+                if (not isinstance(meta, dict) or meta.get("dataset") != "public"
+                    or not isinstance(tags, list)
+                    or not {"synthetic", "candidate", "unreviewed"}.issubset(set(str(t) for t in tags))):
                     issues.append(f"{cid}: candidate status or public dataset marker missing")
                 if case.get("fixture") is not None:
                     issues.append(f"{cid}: fixture must be null until separately reviewed")
@@ -77,14 +84,17 @@ def collect(source: Path, schema_path: Path) -> tuple[list[dict], dict]:
     for family in FAMILIES:
         if counts[family] != PER_FAMILY:
             issues.append(f"{family}: expected {PER_FAMILY}, got {counts[family]}")
-    ordered = sorted(records, key=lambda c: c["id"])
-    index = {"schema_version": "1.0", "dataset_status": "CANDIDATE_NOT_EXECUTED",
-             "cases": [{"id": c["id"], "validators": c["validators"],
-                        "case_sha256": hashlib.sha256(canonical(c)).hexdigest()} for c in ordered]}
     report = {"status": "STRUCTURAL_PASS" if not issues else "BLOCKED",
               "official_benchmark_ready": False, "public_count": len(records),
               "private_holdout_count": None, "holdout_target": HOLDOUT_TARGET,
               "validator_counts": dict(counts), "issues": issues[:150]}
+    if issues:
+        # Never mint an index from a malformed dataset.
+        return [], {"index": {"cases": []}, "report": report}
+    ordered = sorted(records, key=lambda c: c["id"])
+    index = {"schema_version": "1.0", "dataset_status": "CANDIDATE_NOT_EXECUTED",
+             "cases": [{"id": c["id"], "validators": c["validators"],
+                        "case_sha256": hashlib.sha256(canonical(c)).hexdigest()} for c in ordered]}
     return ordered, {"index": index, "report": report}
 
 

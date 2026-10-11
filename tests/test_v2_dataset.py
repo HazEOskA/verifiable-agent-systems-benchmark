@@ -57,3 +57,33 @@ def test_duplicate_id_is_blocked(tmp_path):
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
     _, r = collect(tmp_path, SCHEMA)
     assert r["report"]["status"] == "BLOCKED"
+
+def test_malformed_non_string_prompt_fails_closed(tmp_path):
+    import shutil
+    for source in SRC.glob("*.jsonl"):
+        shutil.copy(source, tmp_path / source.name)
+    target = tmp_path / "correctness.jsonl"
+    lines = target.read_text(encoding="utf-8").splitlines()
+    item = json.loads(lines[0])
+    item["prompt"] = ["malformed"]
+    lines[0] = json.dumps(item)
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    records, r = collect(tmp_path, SCHEMA)
+    assert records == []
+    assert r["report"]["status"] == "BLOCKED"
+    assert r["index"]["cases"] == []
+
+
+def test_malformed_metadata_fails_closed(tmp_path):
+    import shutil
+    for source in SRC.glob("*.jsonl"):
+        shutil.copy(source, tmp_path / source.name)
+    target = tmp_path / "scope.jsonl"
+    lines = target.read_text(encoding="utf-8").splitlines()
+    item = json.loads(lines[0])
+    item["metadata"] = []
+    lines[0] = json.dumps(item)
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    records, r = collect(tmp_path, SCHEMA)
+    assert records == []
+    assert r["report"]["status"] == "BLOCKED"
