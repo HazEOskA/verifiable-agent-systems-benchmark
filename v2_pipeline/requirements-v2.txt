@@ -1,0 +1,4 @@
+# Independent V2 staging helpers; optional dependency file, leaves V1 requirements unchanged.
+pytest>=7
+jsonschema>=4
+cryptography>=41
