@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "release_id": "VASB-V2-UNRELEASED",
+  "benchmark_version": "2.0.0",
+  "benchmark_commit": "UNKNOWN",
+  "expected_case_count": 2000,
+  "required_validators": [
+    "correctness", "evidence", "scope", "permissions", "routing",
+    "tools", "network", "side_effects", "recovery", "idempotency", "transactionality"
+  ],
+  "artifacts": {}
+}
